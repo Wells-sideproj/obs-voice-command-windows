@@ -611,7 +611,26 @@ tickets:
   - id: W11-004
     epic: E2
     title: Runtime composition, CLI capability, and lifecycle seam
-    status: Doing
+    status: Done
+    completion_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/9
+      pull_request_head_sha: f497d24c997c9ed1f61f1949973f57c8789d3731
+      pre_merge_workflow_run_id: 34582587664
+      pre_merge_required_gate: success
+      queue_entry: MQE_lQDOT8W6Tc8AAAABDHpWW84ABAZczgLQLTE
+      merge_group_sha: d24ee9efc921a68c3bd3bb1dbc90986e3e2298e1
+      merge_group_run_id: 34632734526
+      merge_group_check_suite_id: 93819536088
+      merge_group_required_gate: success
+      required_check_integration_id: 15368
+      merge_method: protected_merge_queue_squash
+      merged_develop_sha: d24ee9efc921a68c3bd3bb1dbc90986e3e2298e1
+      merged_at: "2026-09-11T18:21:36Z"
+      post_merge_workflow_run_id: 34632820235
+      post_merge_check_suite_id: 93819782338
+      post_merge_event: push
+      post_merge_required_gate: success
+      layer_b_required: false
     completion_profile: layer_a_post_merge
     ci_stage: full
     arbitration:
@@ -786,15 +805,23 @@ tickets:
   - id: W11-006
     epic: E3
     title: Windows OBS capture resolver and monitor mapping
-    status: Blocked
+    status: Ready
     completion_profile: layer_a_post_merge
     ci_stage: full
     execution:
       escalation_threshold: low
     arbitration:
-      state: none
-      reason: null
-      decision: null
+      state: resolved
+      reason: "Planning scope conflict: production capture-display wiring and center freeze require runtime/controller edits outside the original touch_set. No CI failure."
+      decision: targeted_repair
+      agent_id: 01a08fb9-e456-7a21-80dc-3fc00da1a325
+      route: windows_arbitrator
+      model: gpt-6-astra
+      model_reasoning_effort: medium
+      evidence_sha: f497d24c997c9ed1f61f1949973f57c8789d3731
+      human_input_required: false
+      confidence: high
+      ownership_contract: "Only capture resolution/validation wiring, narrow ObsPort contract, selected-display control and immediate center freeze; preserve platform interfaces, CLI, dependencies and macOS behavior."
     retry:
       state: none
       consecutive_code_failures: 0
@@ -808,6 +835,8 @@ tickets:
       - src/obs_voice_command/config.py
       - tests/test_obs_client.py
       - tests/test_capture_mapping.py
+      - src/obs_voice_command/runtime.py
+      - tests/test_controller.py
   - id: W11-007
     epic: E4
     title: Hardware-free application integration suite
