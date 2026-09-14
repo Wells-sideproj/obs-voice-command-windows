@@ -7,6 +7,8 @@ clock, and waiting behavior replaceable in hardware-free tests.
 from __future__ import annotations
 
 import queue
+import inspect
+import math
 import signal
 import threading
 import time
@@ -43,8 +45,20 @@ class ObsPort(Protocol):
     def connect(self) -> None:
         """Connect to OBS."""
 
-    def find_display_capture(self, scene: str, source: str) -> Any:
+    def find_display_capture(
+        self,
+        scene: str,
+        source: str,
+        *,
+        displays: list[DisplayInfo] | None = None,
+        canvas: tuple[float, float] | None = None,
+    ) -> Any:
         """Resolve the configured OBS scene item."""
+
+    def validate_transform_contract(
+        self, item: Any, canvas: tuple[float, float]
+    ) -> None:
+        """Validate the selected source before audio or transform writes."""
 
     def get_transform(self, item: Any) -> Transform:
         """Read a scene-item transform."""
@@ -80,6 +94,116 @@ Wait: TypeAlias = Callable[[float], None]
 
 class RuntimeStartupError(RuntimeError):
     """A user-actionable failure while composing the runtime."""
+
+
+def _display_tokens(display: Any) -> set[str]:
+    identifiers = [
+        getattr(display, "id", ""),
+        *tuple(getattr(display, "aliases", ()) or ()),
+    ]
+    return {str(identifier) for identifier in identifiers if identifier}
+
+
+def _same_display(left: Any, right: Any) -> bool:
+    """Match the stable display identity and its geometry, never dimensions alone."""
+
+    if left is right:
+        return True
+    if not _display_tokens(left).intersection(_display_tokens(right)):
+        return False
+    for name in (
+        "origin_x",
+        "origin_y",
+        "width_pts",
+        "height_pts",
+        "width_px",
+        "height_px",
+    ):
+        try:
+            if not math.isclose(float(getattr(left, name)), float(getattr(right, name))):
+                return False
+        except (AttributeError, TypeError, ValueError):
+            return False
+    return True
+
+
+def _find_capture_item(
+    obs: ObsPort,
+    scene: str,
+    source: str,
+    displays: list[DisplayInfo],
+    canvas: tuple[float, float],
+) -> Any:
+    """Call the additive capture contract while retaining old fake compatibility."""
+
+    finder = obs.find_display_capture
+    try:
+        parameters = inspect.signature(finder).parameters.values()
+    except (TypeError, ValueError):
+        accepts_kwargs = True
+        names: set[str] = set()
+    else:
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        names = {
+            parameter.name
+            for parameter in inspect.signature(finder).parameters.values()
+        }
+
+    kwargs: dict[str, Any] = {}
+    if accepts_kwargs or "displays" in names:
+        kwargs["displays"] = displays
+    if accepts_kwargs or "canvas" in names:
+        kwargs["canvas"] = canvas
+    return finder(scene, source, **kwargs)
+
+
+def _capture_controller_values(
+    item: Any,
+    displays: list[DisplayInfo],
+    source: tuple[float, float],
+) -> tuple[list[DisplayInfo], DisplayInfo | None, tuple[float, float] | None]:
+    """Resolve the selected OBS display and display-pixel scaling for the controller."""
+
+    mapping = getattr(item, "capture_mapping", None)
+    capture_display = getattr(mapping, "display", None) if mapping is not None else None
+    if capture_display is None:
+        capture_display = getattr(item, "capture_display", None)
+
+    input_kind = str(getattr(item, "input_kind", "") or "").strip().lower()
+    if input_kind == "monitor_capture" and capture_display is None:
+        raise RuntimeStartupError(
+            "OBS monitor_capture was selected but its monitor identity was not mapped"
+        )
+    if capture_display is None:
+        return displays, None, None
+
+    matched_display = next(
+        (display for display in displays if _same_display(capture_display, display)),
+        None,
+    )
+    if matched_display is None:
+        raise RuntimeStartupError(
+            "OBS capture display is not present in the pointer display inventory"
+        )
+
+    if mapping is not None:
+        scale = (
+            float(mapping.display_to_source_scale_x),
+            float(mapping.display_to_source_scale_y),
+        )
+    else:
+        # A display capture without a monitor_id (the macOS-compatible path)
+        # still needs the physical-display-pixel to source-pixel conversion.
+        scale = (
+            float(source[0]) / float(matched_display.width_px),
+            float(source[1]) / float(matched_display.height_px),
+        )
+    if any(not math.isfinite(value) or value <= 0 for value in scale):
+        raise RuntimeStartupError("OBS capture display-to-source scaling is invalid")
+    return [matched_display], matched_display, scale
 
 
 class SystemPointer:
@@ -192,6 +316,8 @@ class ZoomController(threading.Thread):
         clock: Clock | None = None,
         wait: Wait | None = None,
         reconnect_delay: float = 3.0,
+        capture_display: DisplayInfo | None = None,
+        display_to_source_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         super().__init__(daemon=True, name="obs-voice-zoom-controller")
         self._obs = obs
@@ -200,7 +326,23 @@ class ZoomController(threading.Thread):
         self._canvas = canvas
         self._src = src
         self._zoom_cfg = zoom_cfg
-        self._displays = displays
+        self._displays = list(displays)
+        self._capture_display = capture_display
+        if self._capture_display is None and len(self._displays) == 1:
+            self._capture_display = self._displays[0]
+
+        try:
+            self._display_to_source_scale = (
+                float(display_to_source_scale[0]),
+                float(display_to_source_scale[1]),
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ValueError("display-to-source scaling must contain two numbers") from exc
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in self._display_to_source_scale
+        ):
+            raise ValueError("display-to-source scaling must be positive and finite")
         self._dry_run = dry_run
         self._pointer = pointer or SystemPointer()
         self._clock = clock or time.monotonic
@@ -274,8 +416,31 @@ class ZoomController(threading.Thread):
                 else locate_point(mouse_pos, self._displays)
             )
             if result:
-                _, px, py = result
-                return (px, py)
+                located_display, px, py = result
+                if self._capture_display is not None and not _same_display(
+                    located_display, self._capture_display
+                ):
+                    return None
+
+                contains = getattr(located_display, "contains", None)
+                if callable(contains) and not contains(mouse_pos):
+                    return None
+
+                px = float(px)
+                py = float(py)
+                if (
+                    not math.isfinite(px)
+                    or not math.isfinite(py)
+                    or px < 0
+                    or py < 0
+                    or px >= float(located_display.width_px)
+                    or py >= float(located_display.height_px)
+                ):
+                    return None
+                return (
+                    px * self._display_to_source_scale[0],
+                    py * self._display_to_source_scale[1],
+                )
         except Exception:
             # A transient pointer/backend failure must not kill the zoom loop.
             pass
@@ -293,9 +458,12 @@ class ZoomController(threading.Thread):
                     if self._stopping:
                         break
 
-                    if self._target_z > 1.0:
+                    # Keep validating capture membership while zooming out:
+                    # the level animation can outlive the zoom-in target
+                    # center smoothing.
+                    if self._target_z > 1.0 or self._cur_z > 1.0:
                         mouse = self._mouse_src_px()
-                        if mouse:
+                        if mouse is not None:
                             radius = (
                                 self._src[0] / self._target_z
                             ) * self._zoom_cfg.deadzone
@@ -306,6 +474,13 @@ class ZoomController(threading.Thread):
                                 mouse[1],
                                 radius,
                             )
+                        else:
+                            # Do not let a stale target continue moving the
+                            # center while the cursor is outside the selected
+                            # capture display.  Re-entry can establish a new
+                            # target on the next tick.
+                            self._target_cx = self._cur_cx
+                            self._target_cy = self._cur_cy
 
                     self._cur_z = smooth(
                         self._cur_z, self._target_z, self._zoom_cfg.smoothing
@@ -490,11 +665,25 @@ class Runtime:
                     raise RuntimeStartupError(str(exc)) from exc
 
                 try:
-                    item = obs.find_display_capture(config.obs.scene, config.obs.source)
-                    original = obs.get_transform(item)
                     canvas = obs.get_canvas_size()
+                    item = _find_capture_item(
+                        obs,
+                        config.obs.scene,
+                        config.obs.source,
+                        displays,
+                        canvas,
+                    )
+                    original = obs.get_transform(item)
                     source = (item.source_width, item.source_height)
-                except RuntimeError as exc:
+                    validator = getattr(obs, "validate_transform_contract", None)
+                    if callable(validator):
+                        validator(item, canvas)
+                    controller_displays, capture_display, display_to_source_scale = (
+                        _capture_controller_values(item, displays, source)
+                    )
+                except RuntimeStartupError:
+                    raise
+                except Exception as exc:
                     raise RuntimeStartupError(str(exc)) from exc
             else:
                 item = None
@@ -505,6 +694,9 @@ class Runtime:
                     source = (first.width_px, first.height_px)
                 else:
                     source = (1920, 1080)
+                controller_displays = displays
+                capture_display = None
+                display_to_source_scale = (1.0, 1.0)
 
             if not getattr(args, "os", False):
                 controller = ZoomController(
@@ -514,11 +706,14 @@ class Runtime:
                     canvas,
                     source,
                     config.zoom,
-                    displays,
+                    controller_displays,
                     bool(getattr(args, "dry_run", False)),
                     pointer=pointer,
                     clock=dependencies.clock,
                     wait=dependencies.wait,
+                    capture_display=capture_display,
+                    display_to_source_scale=display_to_source_scale
+                    or (1.0, 1.0),
                 )
 
             matcher = Matcher(config.commands)
