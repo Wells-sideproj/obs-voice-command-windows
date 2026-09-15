@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 from argparse import Namespace
 from pathlib import Path
@@ -44,6 +45,24 @@ class FakePointer:
         return display, 960.0, 540.0
 
 
+class MutablePointer(FakePointer):
+    def __init__(self):
+        self.position = (960.0, 540.0)
+        self.pixel = (960.0, 540.0)
+        self.outside = False
+        self.other_display = None
+
+    def get_cursor_position(self):
+        return self.position
+
+    def locate(self, position, displays):
+        del position
+        if self.outside:
+            return None
+        display = self.other_display or displays[0]
+        return display, *self.pixel
+
+
 class FakeObs:
     def __init__(self, *, fail_first_transform=False):
         self.events: list[tuple[str, object]] = []
@@ -74,7 +93,16 @@ class FakeObs:
         self.events.append(("close", None))
 
 
-def _controller(obs, *, wait=None):
+def _controller(
+    obs,
+    *,
+    wait=None,
+    pointer=None,
+    displays=None,
+    capture_display=None,
+    display_to_source_scale=(1.0, 1.0),
+):
+    displays = displays or [DISPLAY]
     return ZoomController(
         obs=obs,
         item=object(),
@@ -82,11 +110,13 @@ def _controller(obs, *, wait=None):
         canvas=(1920, 1080),
         src=(1920, 1080),
         zoom_cfg=ZoomConfig(level=2.0, deadzone=0.15, smoothing=0.12),
-        displays=[DISPLAY],
+        displays=displays,
         dry_run=False,
-        pointer=FakePointer(),
+        pointer=pointer or FakePointer(),
         clock=lambda: 0.0,
         wait=wait,
+        capture_display=capture_display,
+        display_to_source_scale=display_to_source_scale,
     )
 
 
@@ -164,6 +194,154 @@ def test_reconnect_restores_baseline_before_idle_state():
 
     controller.stop()
     assert obs.events[-1] == ("transform", ORIGINAL)
+
+
+def test_zoom_out_freezes_center_when_pointer_leaves_capture_during_animation():
+    obs = FakeObs()
+    pointer = MutablePointer()
+    controller = None
+
+    def one_tick(_seconds):
+        controller._stop_event.set()
+
+    controller = _controller(obs, wait=one_tick, pointer=pointer)
+    controller.handle("zoom_in")
+    with controller._state_lock:
+        controller._cur_z = 2.0
+        controller._target_z = 2.0
+        controller._cur_cx = 800.0
+        controller._cur_cy = 400.0
+        controller._target_cx = 1400.0
+        controller._target_cy = 700.0
+
+    pointer.outside = True
+    controller.handle("zoom_out")
+    controller.start()
+    controller.join(timeout=1)
+
+    assert not controller.is_alive()
+    assert controller._target_z == 1.0
+    assert 1.0 < controller._cur_z < 2.0
+    assert controller._cur_cx == 800.0
+    assert controller._cur_cy == 400.0
+    assert controller._target_cx == controller._cur_cx
+    assert controller._target_cy == controller._cur_cy
+    transform = [event[1] for event in obs.events if event[0] == "transform"][0]
+    assert transform.scale_x == controller._cur_z
+    assert transform.scale_y == controller._cur_z
+
+    controller.stop()
+
+
+def test_non_capture_display_freezes_unfinished_center_smoothing():
+    other_display = DisplayInfo(
+        origin_x=1920,
+        origin_y=0,
+        width_pts=1920,
+        height_pts=1080,
+        width_px=1920,
+        height_px=1080,
+        id="other-display",
+    )
+    obs = FakeObs()
+    pointer = MutablePointer()
+    pointer.other_display = other_display
+    controller = None
+
+    def one_tick(_seconds):
+        controller._stop_event.set()
+
+    controller = _controller(obs, wait=one_tick, pointer=pointer)
+    with controller._state_lock:
+        controller._cur_z = 2.0
+        controller._target_z = 2.0
+        controller._cur_cx = 800.0
+        controller._cur_cy = 400.0
+        controller._target_cx = 1400.0
+        controller._target_cy = 700.0
+
+    controller.start()
+    controller.join(timeout=1)
+
+    assert not controller.is_alive()
+    assert controller._cur_cx == 800.0
+    assert controller._cur_cy == 400.0
+    assert controller._target_cx == controller._cur_cx
+    assert controller._target_cy == controller._cur_cy
+    controller.stop()
+
+
+def test_zoom_started_outside_capture_resumes_center_tracking_on_reentry():
+    obs = FakeObs()
+    pointer = MutablePointer()
+    pointer.outside = True
+    controller = None
+    snapshots = []
+
+    def wait_for_two_ticks(_seconds):
+        snapshots.append((controller._cur_cx, controller._cur_cy))
+        if len(snapshots) == 1:
+            pointer.outside = False
+            pointer.pixel = (1600.0, 800.0)
+        else:
+            controller._stop_event.set()
+
+    controller = _controller(obs, wait=wait_for_two_ticks, pointer=pointer)
+    controller.handle("zoom_in")
+    controller.start()
+    controller.join(timeout=1)
+
+    assert not controller.is_alive()
+    assert snapshots[0] == (960.0, 540.0)
+    assert controller._target_cx > 960.0
+    assert controller._target_cy > 540.0
+    assert controller._cur_cx > 960.0
+    assert controller._cur_cy > 540.0
+    controller.stop()
+
+
+def test_mouse_position_is_converted_to_selected_source_pixels():
+    pointer = MutablePointer()
+    controller = _controller(
+        FakeObs(), pointer=pointer, display_to_source_scale=(1.5, 2.0)
+    )
+
+    assert controller._mouse_src_px() == (1440.0, 1080.0)
+
+
+def test_negative_origin_cursor_is_valid_inside_selected_display():
+    display = DisplayInfo(
+        origin_x=-1920,
+        origin_y=-100,
+        width_pts=1920,
+        height_pts=1080,
+        width_px=1920,
+        height_px=1080,
+        id="negative-display",
+    )
+    pointer = MutablePointer()
+    pointer.position = (-1919.0, -99.0)
+    pointer.pixel = (1.0, 1.0)
+    controller = _controller(
+        FakeObs(),
+        pointer=pointer,
+        displays=[display],
+        capture_display=display,
+    )
+
+    assert controller._mouse_src_px() == (1.0, 1.0)
+
+
+@pytest.mark.parametrize(
+    "pixel",
+    [(-1.0, 10.0), (1920.0, 10.0), (10.0, 1080.0), (math.nan, 10.0), (10.0, math.inf)],
+)
+def test_invalid_or_boundary_cursor_pixels_are_ignored(pixel):
+    pointer = MutablePointer()
+    pointer.pixel = pixel
+    controller = _controller(FakeObs(), pointer=pointer)
+
+    assert controller._mouse_src_px() is None
 
 
 class FakeStream:
