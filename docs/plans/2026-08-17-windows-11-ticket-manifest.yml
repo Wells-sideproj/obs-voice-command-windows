@@ -805,7 +805,35 @@ tickets:
   - id: W11-006
     epic: E3
     title: Windows OBS capture resolver and monitor mapping
-    status: Ready
+    status: Done
+    completion_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/10
+      pull_request_head_sha: 86fafecadc361aa0818768a1f73a5588e7fd3dd1
+      pre_merge_workflow_run_id: 34922521071
+      pre_merge_required_gate: success
+      queue_entry: MQE_lQDOT8W6Tc8AAAABDitiFs4ABAZczgLW1jQ
+      merge_group_sha: 75e0309ed93370674a1210cd614a31013649101e
+      merge_group_run_id: 34922617180
+      merge_group_check_suite_id: 94568525569
+      merge_group_required_gate: success
+      required_check_integration_id: 15368
+      merge_method: protected_merge_queue_squash
+      merged_develop_sha: 75e0309ed93370674a1210cd614a31013649101e
+      merged_at: "2026-09-15T02:50:04Z"
+      post_merge_workflow_run_id: 34922681836
+      post_merge_check_suite_id: 94568691187
+      post_merge_event: push
+      post_merge_required_gate: success
+      layer_b_required: false
+    delivery_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/10
+      pull_request_head_sha: 86fafecadc361aa0818768a1f73a5588e7fd3dd1
+      pre_merge_workflow_run_id: 34922521071
+      queue_entry: MQE_lQDOT8W6Tc8AAAABDitiFs4ABAZczgLW1jQ
+      merge_group_run_id: 34922617180
+      merged_develop_sha: 75e0309ed93370674a1210cd614a31013649101e
+      post_merge_workflow_run_id: 34922681836
+      queue_and_post_merge_evidence: verified
     completion_profile: layer_a_post_merge
     ci_stage: full
     execution:
@@ -840,7 +868,7 @@ tickets:
   - id: W11-007
     epic: E4
     title: Hardware-free application integration suite
-    status: Blocked
+    status: Ready
     completion_profile: layer_a_post_merge
     ci_stage: full
     arbitration:
@@ -862,7 +890,7 @@ tickets:
   - id: W11-008
     epic: E5
     title: Windows documentation and setup UX
-    status: Blocked
+    status: Ready
     completion_profile: layer_a_post_merge
     ci_stage: full
     arbitration:
