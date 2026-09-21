@@ -10,8 +10,8 @@
 
 ## 需求
 
-- Windows 11 path：Windows 11、Python 3.12+、已有 `uv`、OBS Studio 28+。
-- macOS path：macOS 10.14+、Python 3.12+、已有 `uv`、OBS Studio 28+。
+- Windows 11 path：Windows 11、Git、已有 Python 3.12+ executable、已有 `uv`、OBS Studio 28+。
+- macOS path：macOS 10.14+、Git、Python 3.12+、已有 `uv`、OBS Studio 28+。
 - 兩個平台都使用 project-local `.venv`；不要以全域 Python、pip 或 PATH 取代它。
 
 ## 支援矩陣
@@ -27,7 +27,7 @@
 
 ## Windows 11 快速開始
 
-前提是已有 Python 3.12+ 與 `uv`。以下命令使用專案自己的 `.venv`，不修改全域 `PATH`、Python 或 pip 設定，也不讓 uv 自動下載 Python runtime：
+前提是已有 Git、Python 3.12+ 與 `uv`。以下命令使用專案自己的 `.venv`，不修改全域 `PATH`、Python 或 pip 設定，也不讓 uv 自動下載 Python runtime：
 
 ```powershell
 git clone --branch develop --single-branch https://github.com/Wells-sideproj/obs-voice-command-windows.git

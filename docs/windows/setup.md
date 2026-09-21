@@ -1,10 +1,10 @@
 # Windows 11 安裝、OBS 設定與操作
 
-這份文件給已經有 Windows 11、Python 3.12+ 與 `uv` 的使用者。所有 Python 套件都安裝到專案自己的 `.venv`；命令不修改全域 `PATH`、全域 pip、共用 Python 或其他專案的 runtime。本文是使用與 troubleshooting 指南，不宣稱 W11-011 的真實 Windows 11 + OBS + 麥克風 certification 已完成。
+這份文件給已經有 Windows 11、Git、Python 3.12+ executable 與 `uv` 的使用者。所有 Python 套件都安裝到專案自己的 `.venv`；命令不修改全域 `PATH`、全域 pip、共用 Python 或其他專案的 runtime。本文是使用與 troubleshooting 指南，不宣稱 W11-011 的真實 Windows 11 + OBS + 麥克風 certification 已完成。
 
 ## 1. 取得程式與建立 project-local environment
 
-請在全新的 **PowerShell** 視窗執行。`develop` 是 Windows delivery repository 的 canonical branch；不要改用上游 macOS repository 來做 Windows 安裝。
+請在全新的 **PowerShell** 視窗執行。需要 Git 才能執行 clone；`develop` 是 Windows delivery repository 的 canonical branch；不要改用上游 macOS repository 來做 Windows 安裝。
 
 ~~~powershell
 git clone --branch develop --single-branch https://github.com/Wells-sideproj/obs-voice-command-windows.git
@@ -15,6 +15,20 @@ uv sync --frozen --no-python-downloads
 ~~~
 
 `--frozen` 讓 `uv.lock` 保持不變；`--no-python-downloads` 只禁止 uv 自動下載 Python runtime。這不是 ASR 模型離線開關，也不會替你準備 OBS 或麥克風。
+
+若 `uv` 找不到已存在的 Python 3.12+，可以用已存在的絕對路徑明確指定 interpreter。以下語法只把路徑傳給這次的 `uv sync`，不修改 PATH 或其他共用設定：
+
+~~~powershell
+$pythonCommand = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue
+if ($null -eq $pythonCommand) {
+    throw 'No existing Python executable found. Provide an approved Python 3.12+ runtime, then rerun this command.'
+}
+$existingPython = [System.IO.Path]::GetFullPath($pythonCommand.Source)
+& $existingPython --version
+& uv sync --frozen --no-python-downloads --python $existingPython
+~~~
+
+如果沒有現成的 Python 3.12+ executable，請由使用者或組織核准的流程提供/安裝 runtime，再回到這一步；本專案不會自動下載、替你安裝 global Python、修改 global PATH 或改動共用 runtime。
 
 確認使用的是本專案 interpreter：
 
@@ -135,6 +149,7 @@ ASR 模型由正常啟動或 `--dry-run` 的 startup path 準備：
 - 第一次沒有 sentinel 時，程式會下載 archive、保留 archive，並解壓到同一個 cache 根目錄。這需要網路，而且同時需要下載檔與解壓後模型的磁碟空間；不要只按約 488 MB 的 archive 估算可用空間。
 - 程式目前沒有 checksum、簽章或完整檔案清單驗證；`tokens.txt` 存在不等於模型已被下載驗證或所有 ONNX 檔都完整。不要在文件或 log 中宣稱 cache 已驗證。
 - archive 與抽出的模型都保留，因此離線後續執行的前提是：cache sentinel 與 ASR 所需檔案已經由使用者先準備好。若 sentinel 不存在，正常 startup 會嘗試從網路下載；本 CLI 沒有獨立的 model-offline flag。
+- 完全離線執行還需要 project-local `.venv` 的 dependencies 已經在可連網時完成 `uv sync --frozen --no-python-downloads`；只有 ASR cache 而沒有已同步的套件，不能完成離線首次啟動。若套件 wheel 不在 uv cache，離線的 `uv sync` 也不會憑空準備它們。
 
 查看 cache（只讀）：
 
@@ -149,6 +164,8 @@ Get-ChildItem -LiteralPath $modelCache -Force -ErrorAction SilentlyContinue
 
 這個檢查不會下載或修改模型。若磁碟不足，先停止程式並保留可回復的 cache；不要在未確認目標的情況下刪除整個使用者 cache。
 
+本文件中的 config-copy/TOML smoke evidence 見 [`config-copy-smoke.md`](config-copy-smoke.md)。
+
 ## 6. 支援邊界與跨平台行為
 
 - Windows OBS mode 與 macOS OBS mode 都使用同一組 `zoom_in`/`zoom_out` commands；平台差異在 pointer/display 與 OBS backend。
@@ -161,13 +178,21 @@ Get-ChildItem -LiteralPath $modelCache -Force -ErrorAction SilentlyContinue
 
 ### Python 找不到或用了錯的 environment
 
+在 `.venv` 尚未建立時，不要先執行 `.\.venv\Scripts\python.exe`；先確認有可用的 Python 3.12+，再讓 uv 建立 project-local environment：
+
 ~~~powershell
-& .\.venv\Scripts\python.exe --version
+$pythonCommand = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue
+if ($null -eq $pythonCommand) {
+    throw 'Python 3.12+ is not available. Provide an approved runtime; this project does not install one or edit global PATH.'
+}
+$existingPython = [System.IO.Path]::GetFullPath($pythonCommand.Source)
+& $existingPython --version
+& uv sync --frozen --no-python-downloads --python $existingPython
 & .\.venv\Scripts\python.exe -c "import sys; print(sys.executable); print(sys.platform)"
 & .\.venv\Scripts\obs-voice-command.exe --help
 ~~~
 
-確認命令都來自此 repository 的 `.venv\Scripts`。重新執行 `uv sync --frozen --no-python-downloads`；不要使用全域 `pip`、不要修改 PATH，也不要讓 uv 下載另一個 Python。若錯誤提到 Quartz，先確認 `sys.platform` 是 `win32` 與 `sys.executable` 是 project-local 路徑。
+若 `--version` 顯示低於 3.12、Windows Store alias，或 `Get-Command` 找不到 executable，請停止並使用使用者/組織核准的 Python 3.12+ 安裝流程；不要使用全域 `pip`、不要修改 PATH，也不要讓 uv 下載另一個 Python。若錯誤提到 Quartz，確認 `sys.platform` 是 `win32` 與 `sys.executable` 是 project-local 路徑。
 
 ### Quartz / macOS-only dependency
 
