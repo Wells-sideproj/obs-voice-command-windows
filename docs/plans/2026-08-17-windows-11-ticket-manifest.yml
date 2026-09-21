@@ -920,7 +920,37 @@ tickets:
   - id: W11-008
     epic: E5
     title: Windows documentation and setup UX
-    status: Ready
+    status: Done
+    completion_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/12
+      pull_request_head_sha: 646ab4c076d68f6de6eea64e6e865b44fbceaab6
+      pre_merge_workflow_run_id: 35622040509
+      pre_merge_check_suite_id: 96443709622
+      pre_merge_required_gate: success
+      queue_entry: MQE_lQDOT8W6Tc8AAAABEcp2is4ABAZczgLoqR8
+      merge_group_sha: a65f7087bd72ac2b2f6b8378dc552e82dab37d23
+      merge_group_run_id: 35622314091
+      merge_group_check_suite_id: 96444470056
+      merge_group_required_gate: success
+      required_check_integration_id: 15368
+      merge_method: protected_merge_queue_squash
+      merged_develop_sha: a65f7087bd72ac2b2f6b8378dc552e82dab37d23
+      merged_at: "2026-09-21T15:57:18Z"
+      post_merge_workflow_run_id: 35622418871
+      post_merge_workflow_id: 339180855
+      post_merge_check_suite_id: 96444762527
+      post_merge_event: push
+      post_merge_required_gate: success
+      layer_b_required: false
+    delivery_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/12
+      pull_request_head_sha: 646ab4c076d68f6de6eea64e6e865b44fbceaab6
+      pre_merge_workflow_run_id: 35622040509
+      queue_entry: MQE_lQDOT8W6Tc8AAAABEcp2is4ABAZczgLoqR8
+      merge_group_run_id: 35622314091
+      merged_develop_sha: a65f7087bd72ac2b2f6b8378dc552e82dab37d23
+      post_merge_workflow_run_id: 35622418871
+      queue_and_post_merge_evidence: verified
     completion_profile: layer_a_post_merge
     ci_stage: full
     arbitration:
@@ -1020,7 +1050,7 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: Blocked
+    status: Ready
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
     execution:
