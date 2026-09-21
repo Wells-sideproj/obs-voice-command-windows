@@ -1056,9 +1056,19 @@ tickets:
     execution:
       escalation_threshold: low
     arbitration:
-      state: none
-      reason: null
-      decision: null
+      state: resolved
+      reason: "Separate completed-run verification from producer; narrow finalizer read permissions and phased simulation acceptance. Planning conflict, not CI failure."
+      decision: targeted_repair
+      agent_id: 01a0c63b-fbb8-7722-8ca7-4c87f8e9046c
+      route: windows_arbitrator
+      model: gpt-6-astra
+      model_reasoning_effort: medium
+      evidence_sha: a75002cec2290f3e510af78fcec1ba36b5a25bc4
+      evidence: docs/validation/w11-010-architecture-arbitration.json
+      human_input_required: false
+      confidence: high
+      finalizer_permissions: [contents_read, actions_read, checks_read, pull_requests_read, issues_write]
+      acceptance_phases: [pre_merge_fake_transport, exact_merged_sha_producer_and_finalizer, isolated_live_simulation_pass_fail_rerun]
     retry:
       state: none
       consecutive_code_failures: 0
@@ -1073,6 +1083,13 @@ tickets:
       - .github/ISSUE_TEMPLATE/repair.yml
       - tools/windows11_integration_harness.py
       - tests/integration/windows11/**
+      - .github/workflows/post-merge-finalize.yml
+      - tools/post_merge_publisher.py
+      - WORKFLOW.md
+      - docs/plans/2026-08-17-windows-11-port-plan.md
+      - docs/plans/2026-08-17-windows-11-ticket-manifest.yml
+      - docs/validation/w11-010-*.md
+      - docs/validation/w11-010-*.json
   - id: W11-011
     epic: E4
     title: Windows 11 real-machine E2E certification
