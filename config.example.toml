@@ -1,13 +1,13 @@
 [obs]
 host = "localhost"
 port = 4455
-password = ""
-scene = ""          # 空 = 自動偵測目前 program scene
-source = ""         # 空 = 自動找第一個 display capture source
+password = ""       # 本機密碼；不要提交真實密碼
+scene = ""          # 空 = 使用目前 program scene
+source = ""         # 空 = 僅在恰好一個支援 capture source 時自動選取；多個時請填 exact name
 
 [zoom]
 level = 2.0         # OBS 縮放倍率
-os_level = 2.0      # --os 模式（真 macOS 縮放）的倍率；全螢幕體感較強，嫌大可調 1.5
+os_level = 2.0      # 範例 override；只供 macOS-only --os 模式。省略時程式預設為 1.5
 deadzone = 0.15     # 滑鼠死區（可視範圍比例），內部移動不觸發追蹤
 smoothing = 0.12    # 緩動係數（越大追越快）
 

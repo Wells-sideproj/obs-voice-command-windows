@@ -1,74 +1,96 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/htlin222/obs-voice-command)](https://github.com/htlin222/obs-voice-command/stargazers)
 [![Python](https://img.shields.io/badge/Python-%3E%3D3.12-3776AB.svg?logo=python&logoColor=white)](https://www.python.org)
+[![Upstream GitHub stars](https://img.shields.io/github/stars/htlin222/obs-voice-command)](https://github.com/htlin222/obs-voice-command/stargazers)
 
 # obs-voice-command
 
-macOS 上用語音指令控制 OBS 直播畫面縮放。說「來個特寫」時，畫面平滑 zoom 到滑鼠位置並持續追蹤滑鼠移動；說「退回全畫面」時緩動回全畫面。語音辨識在本機跑（串流中文 ASR），不需網路連線也不需訓練錄音樣本。
+用本機語音指令控制 OBS 畫面縮放：說「來個特寫」時，畫面平滑 zoom 到滑鼠位置並持續追蹤；說「退回全畫面」時緩動回全畫面。語音辨識在本機執行，不需訓練錄音樣本。
+
+這個 Windows 版本保留原始 macOS 專案的可用流程，並加入 Windows 11 的 OBS capture 與顯示器對應。Windows 交付 repository 是 [`Wells-sideproj/obs-voice-command-windows`](https://github.com/Wells-sideproj/obs-voice-command-windows)；原始上游專案與歷史說明仍保留在 [`htlin222/obs-voice-command`](https://github.com/htlin222/obs-voice-command)。本文件描述安裝與操作，不是 W11-011 真實 Windows 11、OBS 或麥克風 certification evidence。
 
 ## 需求
 
-- **macOS** 10.14+（使用 Quartz 框架取滑鼠座標）
-- **OBS** 28+（內建 WebSocket server，無須額外外掛）
-- **Python** 3.12+
-- **uv** 套件管理工具
+- Windows 11 path：Windows 11、Git、已有 Python 3.12+ executable、已有 `uv`、OBS Studio 28+。
+- macOS path：macOS 10.14+、Git、Python 3.12+、已有 `uv`、OBS Studio 28+。
+- 兩個平台都使用 project-local `.venv`；不要以全域 Python、pip 或 PATH 取代它。
 
-## 安裝
+## 支援矩陣
 
-```bash
-git clone https://github.com/htlin222/obs-voice-command.git
-cd obs-voice-command
-uv sync
+| 執行方式 | 支援內容 | 指令 action |
+| --- | --- | --- |
+| Windows 11 + OBS | 透過 OBS WebSocket 修改選定 capture source 的 transform | `zoom_in`、`zoom_out` |
+| macOS + OBS | 原有 OBS transform 流程 | `zoom_in`、`zoom_out` |
+| macOS-only `--os` | 透過 macOS Accessibility Zoom 做整個螢幕縮放，不修改 OBS transform | 仍使用 `zoom_in`、`zoom_out` |
+| Windows + `--os` | 不支援；會在模型、音訊、pointer 或 OBS side effect 前結束 | — |
+
+`--os` 是輸出模式，不會新增 `os_zoom_in` 或 `os_zoom_out` 設定 action。`config.toml` 的 `[[commands]].action` 只接受 `zoom_in` 和 `zoom_out`；舊文件中的 `os_zoom_*` 寫法已失效。
+
+## Windows 11 快速開始
+
+前提是已有 Git、Python 3.12+ 與 `uv`。以下命令使用專案自己的 `.venv`，不修改全域 `PATH`、Python 或 pip 設定，也不讓 uv 自動下載 Python runtime：
+
+```powershell
+git clone --branch develop --single-branch https://github.com/Wells-sideproj/obs-voice-command-windows.git
+Set-Location .\obs-voice-command-windows
+uv sync --frozen --no-python-downloads
+
+if (Test-Path -LiteralPath .\config.toml) {
+    Write-Host 'config.toml already exists; leaving it unchanged.'
+} else {
+    Copy-Item -LiteralPath .\config.example.toml -Destination .\config.toml -ErrorAction Stop
+}
+
+& .\.venv\Scripts\python.exe -c "import tomllib; from pathlib import Path; tomllib.loads(Path('config.toml').read_text(encoding='utf-8')); print('config.toml: valid TOML')"
+& .\.venv\Scripts\obs-voice-command.exe --help
 ```
 
-首次執行時，ASR 模型會自動下載到 `~/.cache/obs-voice-command/`（約 488MB），之後不需重複下載。
+完成 OBS 設定與 Windows 麥克風權限後，在同一個 PowerShell 目錄執行：
 
-## OBS 設定
+```powershell
+# 列出可用麥克風；只查詢裝置，不載入 ASR、不連 OBS
+& .\.venv\Scripts\obs-voice-command.exe --list-devices
 
-1. 開啟 OBS
-2. 前往 **工具 → WebSocket 伺服器設定**
-3. 勾選 **啟用 WebSocket server**
-4. 如果設了伺服器密碼，將密碼複製到本專案的 `config.toml` 的 `[obs]` 區塊內 `password` 欄位
+# dry-run：不建立/連線 OBS，但仍會載入 ASR、讀取 pointer/display、開啟麥克風
+& .\.venv\Scripts\obs-voice-command.exe --config .\config.toml --dry-run
 
-## 快速開始
+# 正式啟動
+& .\.venv\Scripts\obs-voice-command.exe --config .\config.toml
+```
 
-開啟 OBS 後，執行：
+正式程序在前景執行；停止時回到同一個 PowerShell 視窗按 `Ctrl+C`，讓程式走正常 restore path。沒有獨立的 `stop` CLI；日常停止不應以強制終止程序取代 `Ctrl+C`。
+
+完整的 Windows OBS、權限、cache、source 選擇與疑難排解請見 [`docs/windows/setup.md`](docs/windows/setup.md)。
+
+## OBS 需求與設定摘要
+
+- OBS Studio 28+ 已內建 WebSocket；5.x 預設 port 是 `4455`。在 OBS 開啟 **工具 → WebSocket 伺服器設定**（英文 UI 可能顯示 **WebSocket Server Settings** 或 **obs-websocket Settings**），啟用 server、確認 port，並把密碼放到本機 `config.toml` 的 `[obs].password`。不要把真實密碼放進 README、範例、log 或 commit。
+- 在要控制的 scene 新增 **Display Capture／顯示器擷取** source。`[obs].source` 留空只會在恰好一個支援的 capture source 時自動選取；有多個 source 時，請填 Sources 面板中的完整、大小寫相符名稱。
+- Windows source 必須能以穩定 monitor identity 對應到實際顯示器；程式不會以解析度猜測顯示器。選定 source 後若 mapping 失敗，依錯誤中的 source/kind/可用 display ID 修正 OBS source 與 `[obs].source`。
+- 程式啟動時會拒絕不符合 zoom math 的 transform：左上對齊、position `(0, 0)`、`boundsType=none`、`boundsWidth=0`、`boundsHeight=0`、`boundsAlignment=0`、crop 四邊為 0、rotation 為 0、scale X/Y 為相同且正值，並且 source 的實際 geometry 必須精確填滿 OBS canvas。Fit-to-Screen 單獨使用不保證通過；比例不合、殘留 bounds 或 letterboxing 都必須先修正。
+
+## macOS 使用方式
+
+原有 macOS OBS 流程仍可使用：
 
 ```bash
+uv sync --frozen
+if [ -e config.toml ]; then echo "config.toml already exists; leaving it unchanged."; else cp config.example.toml config.toml; fi
 uv run obs-voice-command
-```
-
-程式會用預設設定連接 OBS（localhost:4455）。沒有 `config.toml` 時全部使用預設值；要自訂請見下方「自訂指令」。
-
-**測試語音辨識** 而不實際動作 OBS：
-
-```bash
 uv run obs-voice-command --dry-run
+uv run obs-voice-command --list-devices
 ```
 
-**改用真 macOS 螢幕縮放**（輔助使用 Zoom，你和觀眾都看到放大；需開啟「使用鍵盤快速鍵來縮放」並給終端機輔助使用權限）：
+若要用真正的 macOS 螢幕縮放（不是 OBS transform），需先在系統輔助使用中允許終端機，並開啟「使用鍵盤快速鍵來縮放」，再執行：
 
 ```bash
 uv run obs-voice-command --os
 ```
 
-同一組語音詞；倍率由 `config.toml` 的 `[zoom] os_level` 控制（預設 1.5）。
-
-**列出系統麥克風**：
-
-```bash
-uv run obs-voice-command --list-devices
-```
+`--os` 仍使用設定中的 `zoom_in`/`zoom_out` phrases；`[zoom].os_level` 只影響此 macOS-only 模式。`config.example.toml` 內的 `os_level = 2.0` 是範例檔明確寫入的 override；若設定檔省略這個欄位，程式預設值是 `1.5`。
 
 ## 自訂指令
 
-將 `config.example.toml` 複製為 `config.toml`：
-
-```bash
-cp config.example.toml config.toml
-```
-
-編輯 `config.toml`，修改 `[[commands]]` 區塊：
+編輯 `config.toml` 的 `[[commands]]`：
 
 ```toml
 [[commands]]
@@ -80,26 +102,7 @@ phrases = ["退回全畫面", "拉遠"]
 action = "zoom_out"
 ```
 
-- `phrases`：字串陣列，關鍵詞列表（辨識時忽略聲調，同音字會相符）
-- `action`：支援 `zoom_in`、`zoom_out`、`os_zoom_in`、`os_zoom_out`
-  - `os_zoom_in` / `os_zoom_out`：改觸發真正的 macOS 螢幕縮放（輔助使用 Zoom，需開啟「使用鍵盤快速鍵來縮放」並給終端機輔助使用權限）；預設語音詞「螢幕放大」「螢幕縮小」
-
-## 疑難排解
-
-**「麥克風存取被拒」**
-
-系統設定 → 隱私權與安全性 → 麥克風，將你的終端機 app 加入允許清單。
-
-**「Display capture source not found」**
-
-確認 OBS 已開啟，且設定好 scene。錯誤訊息會列出該 scene 裡所有可用的 source，複製正確的 source 名稱填入 `config.toml` 的 `[obs]` 區塊內 `source` 欄位。
-
-**「WebSocket 連不上」**
-
-檢查以下項目：
-- OBS 是否執行中
-- WebSocket server 是否已啟用（工具 → WebSocket 伺服器設定）
-- `config.toml` 內的 `host`、`port`、`password` 是否正確
+`phrases` 是關鍵詞列表；辨識時會忽略聲調，同音字也可能相符。`[obs].scene = ""` 使用目前 program scene；`[obs].source` 若非空，必須是 OBS scene 中支援 capture source 的 exact name。
 
 ## 開發
 
@@ -110,18 +113,16 @@ uv run pytest
 模組一覽：
 
 - **config.py** — 設定檔解析、預設值管理
-- **matcher.py** — 語音辨識結果與指令 phrase 的比對邏輯
-- **zoom.py** — 縮放狀態管理（目標倍率、緩動計算）
-- **mouse.py** — 系統滑鼠座標取得（macOS Quartz）
-- **asr.py** — sherpa-onnx ASR 驅動、模型下載
-- **obs_client.py** — OBS WebSocket 通訊、指令發送
-- **main.py** — 主迴圈、語音→指令→OBS 協調
+- **matcher.py** — 語音辨識結果與指令 phrase 的比對
+- **zoom.py** — 縮放狀態、倍率與 transform 計算
+- **mouse.py** — 平台 pointer/display facade
+- **asr.py** — sherpa-onnx ASR 驅動與模型 cache
+- **obs_client.py** — OBS WebSocket 通訊、source/monitor mapping 與 transform contract
+- **runtime.py** — 語音→指令→OBS lifecycle
 
-## Citation
+## Citation 與上游致謝
 
-If you use this project, please cite it:
-
-**BibTeX:**
+本專案源自 [htlin222/obs-voice-command](https://github.com/htlin222/obs-voice-command)，若使用本專案請保留原作者致謝：
 
 ```bibtex
 @software{lin2026obsvoicecommand,
@@ -133,19 +134,9 @@ If you use this project, please cite it:
 }
 ```
 
-<details>
-<summary>AMA format</summary>
-
-Lin HT. obs-voice-command: Voice-commanded zoom-to-mouse for OBS on macOS. Published online 2026. https://github.com/htlin222/obs-voice-command
-
-</details>
-
-<details>
-<summary>APA format</summary>
+Lin HT. *obs-voice-command: Voice-commanded zoom-to-mouse for OBS on macOS*. Published online 2026. https://github.com/htlin222/obs-voice-command
 
 Lin, H.-T. (2026). *obs-voice-command: Voice-commanded zoom-to-mouse for OBS on macOS* (Version 0.1.0) [Computer software]. https://github.com/htlin222/obs-voice-command
-
-</details>
 
 ## License
 

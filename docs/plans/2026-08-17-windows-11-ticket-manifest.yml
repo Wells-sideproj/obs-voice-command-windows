@@ -868,7 +868,37 @@ tickets:
   - id: W11-007
     epic: E4
     title: Hardware-free application integration suite
-    status: Ready
+    status: Done
+    completion_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/11
+      pull_request_head_sha: d09dff0802be68a6ebf95859e2f2d7b2e02a6b15
+      pre_merge_workflow_run_id: 35493853729
+      pre_merge_check_suite_id: 96109944320
+      pre_merge_required_gate: success
+      queue_entry: MQE_lQDOT8W6Tc8AAAABESYw2M4ABAZczgLl7_Y
+      merge_group_sha: 990518933d75e22adcd64d4928de1b7e3a464cdb
+      merge_group_run_id: 35493962448
+      merge_group_check_suite_id: 96110211428
+      merge_group_required_gate: success
+      required_check_integration_id: 15368
+      merge_method: protected_merge_queue_squash
+      merged_develop_sha: 990518933d75e22adcd64d4928de1b7e3a464cdb
+      merged_at: "2026-09-20T06:21:06Z"
+      post_merge_workflow_run_id: 35494001331
+      post_merge_workflow_id: 339180855
+      post_merge_check_suite_id: 96110305131
+      post_merge_event: push
+      post_merge_required_gate: success
+      layer_b_required: false
+    delivery_evidence:
+      pull_request: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/11
+      pull_request_head_sha: d09dff0802be68a6ebf95859e2f2d7b2e02a6b15
+      pre_merge_workflow_run_id: 35493853729
+      queue_entry: MQE_lQDOT8W6Tc8AAAABESYw2M4ABAZczgLl7_Y
+      merge_group_run_id: 35493962448
+      merged_develop_sha: 990518933d75e22adcd64d4928de1b7e3a464cdb
+      post_merge_workflow_run_id: 35494001331
+      queue_and_post_merge_evidence: verified
     completion_profile: layer_a_post_merge
     ci_stage: full
     arbitration:
