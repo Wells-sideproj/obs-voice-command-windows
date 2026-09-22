@@ -1,0 +1,37 @@
+{
+  "agent_id": "01a0c63b-fbb8-7722-8ca7-4c87f8e9046c",
+  "route": "windows_arbitrator",
+  "model": "gpt-6-astra",
+  "model_reasoning_effort": "medium",
+  "decision": {
+    "ticket_id": "W11-010",
+    "decision": "targeted_repair",
+    "root_cause": "Requiring a registration to contain its own final squash SHA or a subsequently created repair issue ID creates a circular bootstrap. Protected registration should identify PR relationships known before merge; verified GitHub execution supplies the resulting commit and publication IDs afterward.",
+    "evidence": [
+      "Current read-only inspection found a clean worktree at 87a2b75855e818823bdfcebf339bc5c14aa37982, with the earlier arbitration recorded and no W11-010 lineage registration present.",
+      "The controller can register a real PR number before queue enrollment; its final merged SHA and any failure-created repair issue number are unavailable at that stage.",
+      "GitHub supports ordinary comments on PRs through the Issues API using issues:write, so a separate tracker issue is unnecessary. [Issue comments](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment)",
+      "GitHub provides commit-to-PR association for verifying the PR introducing the source run's commit. [Commit association](https://docs.github.com/en/rest/commits/commits#list-pull-requests-associated-with-a-commit)"
+    ],
+    "directed_repair": [
+      "Place registration under each existing tickets[] entry as post_merge_registration: {version: 1, attempts: [...]}. Each attempt has exactly pr_number, predecessor_pr_number, and repair_issue_number. The originating attempt has null predecessors and null repair_issue_number. A repair attempt references its immediate predecessor PR and the already-existing repair issue. Inherit ticket_id from the containing ticket; derive the stable lineage key from repository identity, ticket ID, and the first registered PR number.",
+      "Do not require originating_commit, protected_commits, tracker_issue_number, originating_pr_number, predecessor_lineage_id, or a future repair_issue_id in registration. The first attempt already identifies the originating PR. Keep source_workflow_path and required_jobs in the existing shared workflow/quality contract, not per-attempt metadata. Simulation namespace belongs exclusively to the isolated simulation configuration.",
+      "After creating the real PR, the controller commits its registration on that PR branch before queue enrollment. Re-run checks on the resulting head. Registration becomes trusted when that PR reaches protected develop. Do not register invented PR numbers, placeholder SHAs, or a commit's own hash.",
+      "For the first post-merge run, read the manifest at the verified source run's head_sha. Find the uniquely registered PR that GitHub confirms is merged into develop with merge_commit_sha equal to head_sha. Derive the final merged SHA from this agreement between the trusted run and GitHub PR data. No pre-existing manifest completion_evidence or protected_commits entry is required. Missing derived output fields must not block an otherwise valid initial run.",
+      "Use the verified source PR number as the PASS/evidence projection target. Create or update a dedicated publisher comment through /issues/{pr_number}/comments; preserve the PR body and merged state. Include the exact source SHA, run/attempt, workflow, suite/provider and conclusions. Treat the comment as a projection; only the controller records authoritative manifest completion.",
+      "On the first verified failure, discover or create the deduplicated repair issue using the previously directed provenance checks and serialized reconciliation. Its number is a runtime output, not a prerequisite for processing that failure. A later protected registration is not required to recognize a rerun: validate the existing candidate against the registered originating PR and genuine failure run. Ambiguous candidates still fail closed.",
+      "When a repair PR later exists, the controller appends its attempt entry in that repair PR, using the already-known predecessor PR and repair issue number. Preserve previous entries. Derive every attempt's merged SHA through GitHub verification and validate predecessor ancestry. Repair issue registration therefore occurs in a future repair PR, never through a special direct push or a bookkeeping-only prerequisite for the initial finalizer.",
+      "For stale-result protection, reconcile registrations from a captured protected develop tip as well as the source commit. Determine the latest merged registered attempt through verified PR data and ancestry; an older source result remains historical and cannot close a later repair. Do not equate an unrelated newer develop commit with a new attempt in this lineage.",
+      "Add tests proving an initial registration with no commit hashes and no repair issue number successfully publishes PASS; first FAIL creates one repair issue; rerun reuses it before any registration update; and a later registered repair supersedes an older PASS. Retain all previously required completion and live simulation evidence."
+    ],
+    "manifest_changes": [
+      "Document the optional post_merge_registration.version=1 and attempts schema within the existing manifest contract. No actual PR registration is authorized or performed by this read-only response.",
+      "Require real registration before queue enrollment, not before PR creation. Validate positive unique PR numbers, a single originating attempt, and an unambiguous predecessor chain; repair attempts require an existing repair issue number.",
+      "Keep derived merged SHAs, run IDs, suite/provider evidence, comment IDs and newly created repair issue IDs in runtime evidence and subsequent controller bookkeeping, outside required bootstrap inputs.",
+      "Preserve manifest schema_version 6 unless existing schema validation requires an explicit compatibility bump; do not introduce a second top-level schema_version for lineage records.",
+      "Preserve zero retries, existing permissions, completion requirements, dependency DAG, and deferred live OBS authorization."
+    ],
+    "human_input_required": false,
+    "confidence": "high"
+  }
+}
