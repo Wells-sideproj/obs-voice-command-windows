@@ -1063,7 +1063,7 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: Ready
+    status: PR
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
     post_merge_registration:
@@ -1072,10 +1072,15 @@ tickets:
         - pr_number: 13
           predecessor_pr_number: null
           repair_issue_number: null
+        - pr_number: 15
+          predecessor_pr_number: 13
+          repair_issue_number: 14
     diagnostic_repair:
-      state: Ready
+      state: PR
       issue_number: 14
       issue_url: https://github.com/Wells-sideproj/obs-voice-command-windows/issues/14
+      pr_number: 15
+      pr_url: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/15
       originating_pr_number: 13
       originating_merged_sha: 00ab9d1438adbd206e43e85e031615a734eb68aa
       failed_finalizer_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/37104847448
@@ -1083,6 +1088,15 @@ tickets:
       user_approved: true
       code_retry_budget_consumed: false
       scope: sanitized_http_error_diagnostics_only
+    post_merge_arbitration:
+      state: resolved
+      decision: needs_human
+      route: windows_arbitrator
+      model: gpt-6-astra
+      model_reasoning_effort: medium
+      root_cause: unresolved
+      human_input: approved_narrow_diagnostic_pr_only
+      evidence_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/37104847448
     execution:
       escalation_threshold: low
     arbitration:
