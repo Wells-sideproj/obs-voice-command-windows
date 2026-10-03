@@ -1,0 +1,62 @@
+name: W11-010 isolated comment diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: w11-010-comment-probe
+  cancel-in-progress: false
+
+jobs:
+  comment-probe:
+    name: w11-010 / isolated comment probe
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify canonical protected develop context
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Wells-sideproj/obs-voice-command-windows"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/develop"
+
+      - name: Check out protected develop
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify checked out trusted SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'GITHUB_SHA must be a full commit SHA' >&2
+            exit 1
+          fi
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$GITHUB_SHA" ]]; then
+            echo 'checked out HEAD does not match the workflow dispatch SHA' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != 'refs/heads/develop' ]]; then
+            echo 'workflow dispatch ref drifted from protected develop' >&2
+            exit 1
+          fi
+
+      - name: Select Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Run bounded issue-comment probe
+        shell: bash
+        run: python tools/w11_010_comment_probe.py
