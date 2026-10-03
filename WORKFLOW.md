@@ -121,6 +121,27 @@ active merge-queue contract.
 - Through W11-009, the trusted `push` run of `ci.yml` is the temporary post-merge provider. The controller records workflow ID, run URL, check-suite app, merged SHA, and conclusion; only `success` on the exact merged SHA is acceptable.
 - W11-010 makes `post-merge.yml` the authoritative post-merge Layer A provider. This avoids requiring a downstream workflow before the ticket that creates it is complete.
 
+### W11-010 post-merge producer/finalizer 契約
+
+- `post-merge.yml` 是可信任的 `push`-to-`develop` producer。它的 job graph 與相關 environment 必須從 `ci.yml` 複製，只有 `contents: read`，不得寫入 issues、checks、Actions state 或 pull requests。
+- `post-merge-finalize.yml` 是獨立 workflow，只接收指定 producer 在 `develop` 完成的 run，並提供只有 `github.ref == refs/heads/develop` 才能執行的 trusted manual reconciliation；它不是 pull-request 或 merge-group publisher。它的 top-level permissions 為空，唯一 job 精確取得 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read`、`issues: write`，並以 `cancel-in-progress: false` 序列化。
+- Finalizer 重新抓取並驗證 repository identity、producer workflow ID/path、`push` event、`develop` branch、completed status、source SHA、current run attempt、該 SHA 對應的 GitHub Actions check-suite identity、分頁取得的全部 required jobs，以及唯一 base 為 `develop` 且 `merge_commit_sha` 等於 source SHA 的 merged PR。Producer event 的 source SHA 是權威值，不採用 finalizer 自己的 SHA。
+- Controller-owned registration 必須在 queue enrollment 前，經 protected `develop` 提交。每張 ticket 可使用以下窄幅 schema：
+
+  ```yaml
+  post_merge_registration:
+    version: 1
+    attempts:
+      - pr_number: <real originating PR number>
+        predecessor_pr_number: null
+        repair_issue_number: null
+  ```
+
+  Repair attempt 使用 immediate predecessor PR 與已存在的 repair issue number。Worker 不得自行編造 PR number、commit SHA 或 future issue ID；merged SHA、run ID、comment 與新建 issue ID 都是 runtime evidence 與 controller bookkeeping。
+- Issue body、label 與 PR comment 都是可編輯 projection。Reducer 從 verified run 與 protected registration 重建 retry state，分頁搜尋 open/closed issues，驗證 bot author 與 machine payload，去重相同 run/attempt 的 rerun，並讓較新的 failure 對 stale PASS 保持權威。每次 invocation 都 reconcile protected `develop` 可見的所有 registered lineage run，不只處理觸發它的 delivery。
+- Finalizer 的 `workflow_dispatch.simulation_case` 只允許 `none`、`pass`、`fail`、`rerun`；非 `none` 時固定使用 `w11-010-simulation` namespace，透過 real Issues API 建立／更新隔離 projection，不讀寫 manifest、PR comment、production ticket 或 production retry state。`rerun` 必須找到既有 simulation failure，且不得增加 retry count。
+- W11-010 acceptance 分三階段：(1) merge 前 fake-transport publisher tests；(2) protected merge 後 exact merged-SHA producer/finalizer evidence；(3) 隔離且明確標示 simulated 的 live PASS/FAIL/rerun publication 與 issue read-back。Local tests 不得取代第 (2) 或第 (3) 階段。
+
 ### Merge execution contract
 
 - Protect `develop` with pull requests and required check `required / gate`.
@@ -142,9 +163,10 @@ active merge-queue contract.
 
 ### Trigger and runner
 
-- W11-010 implements the reusable workflow, harness, cleanup, and repair behavior but does not activate live OBS on every `develop` push.
-- W11-011 activates the trusted `push` to protected `develop` trigger for certification commits.
-- Optional recovery/debug event: manually approved `workflow_dispatch` for an exact commit.
+- W11-010 實作 inactive reusable/manual workflow、harness、cleanup 與 repair behavior，但不在每次 `develop` push 啟動 live OBS；該 workflow 沒有 `push`、pull-request 或 merge-group trigger。
+- W11-011 才會為 certification commit 啟用 trusted `push` 到 protected `develop` trigger。
+- Optional recovery/debug event 為針對 exact commit、經人工核准的 `workflow_dispatch`。
+- 在配置 self-hosted runner 前，先執行 hosted preflight；只接受 canonical repository、`refs/heads/develop`、目前 protected `develop` 的 exact SHA 與 separately recorded hardware authorization。Live harness 強制鎖定 `127.0.0.1`，在啟動自有 OBS 前證明 port `4455` 未被占用，並分開回報 primary failure 與 cleanup failure。
 - Runner labels: `[self-hosted, Windows, X64, obs-integration]`.
 - Use an interactive logged-in Windows 11 desktop session. Do not run the OBS integration runner as a non-interactive service session.
 - Serialize runs with one concurrency group for the OBS runner; do not cancel an active cleanup sequence.

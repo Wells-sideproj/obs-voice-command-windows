@@ -1047,6 +1047,19 @@ tickets:
         - merge_group_check_suite_provider
         - final_merged_develop_sha
         - trusted_push_ci_run_on_exact_merged_sha
+  # W11-010 lineage registration 契約（controller 只在真實 PR 存在且 queue
+  # enrollment 前填入實值；worker 不得自行編造）：
+  # post_merge_registration:
+  #   version: 1
+  #   attempts:
+  #     - pr_number: <real originating PR number>
+  #       predecessor_pr_number: null
+  #       repair_issue_number: null
+  #   # Repair attempt 使用 immediate predecessor PR 與既有 repair issue number。
+  #   # SHA/run/comment/created-issue output 在 runtime 推導並由 controller 記錄，
+  #   # 不得使用 bootstrap placeholder。
+  # develop-only finalizer 的 simulation_case 固定使用 w11-010-simulation
+  # namespace，絕不修改 production ticket/retry state。
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
@@ -1065,6 +1078,8 @@ tickets:
       model_reasoning_effort: medium
       evidence_sha: a75002cec2290f3e510af78fcec1ba36b5a25bc4
       evidence: docs/validation/w11-010-architecture-arbitration.json
+      pre_pr_follow_up_evidence: docs/validation/w11-010-pre-pr-arbitration.json
+      pre_pr_follow_up_gate: local_directed_repairs_verified_pending_pr_ci
       human_input_required: false
       confidence: high
       finalizer_permissions: [contents_read, actions_read, checks_read, pull_requests_read, issues_write]

@@ -400,8 +400,14 @@ Acceptance criteria：
 5. 同一 commit／workflow run 重跑不建立重複 ticket。
 6. Repair PR 仍必須走相同 required checks 與 auto-merge，不得 bypass。
 7. 可提交 Layer B reusable/manual workflow、integration harness、always-run cleanup 與 hardware-free tests，但不得在此 ticket 把 real OBS 設為每次 `develop` push 的 active completion gate。
+8. `post-merge.yml` 必須是 `push` 到 `develop` 的完整 Layer A producer，與 `ci.yml` 的 jobs／相關 env 保持 parity，只有 `contents: read`；另以獨立 `post-merge-finalize.yml` 驗證 completed producer run，手動 reconciliation 也只能從 `refs/heads/develop` 執行，並只使用 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read`、`issues: write`。
+9. Finalizer 必須以 source run 的 SHA 為準，驗證 repository、workflow ID/path、push/develop/completed/attempt、GitHub Actions check suite、所有 required jobs 的分頁結果，以及 exact merged develop PR；不得以 finalizer 自己的 SHA 或可編輯 issue/comment marker 取代來源證據。
+10. Manifest 中的 `post_merge_registration` 只記錄 controller 在真實 PR 存在後、queue enrollment 前可取得的 `version: 1`、PR relationship 與既有 repair issue；不得預填 SHA 或未來 issue ID。Finalizer 每次 reconcile 所有 protected registration lineage，且同一 run/attempt rerun 只能更新既有 projection，不得重複建立 Repair Ticket；較新的 failure 必須壓過 stale PASS。
+11. Fake transport 測試至少涵蓋 PASS、FAIL、rerun、stale PASS、concurrent dedup、pagination、edited marker、partial API failure，以及錯誤 workflow、repository、check provider provenance；這些是 simulated evidence，不是 live GitHub evidence。
+12. Layer B workflow 只允許 trusted manual/reusable invocation，先在 hosted preflight 驗證 exact protected `develop` SHA 與 hardware authorization，再配置 `[self-hosted, Windows, X64, obs-integration]`；live harness 只連 `127.0.0.1:4455`，啟動前確認 port 未被占用，並在 finally 還原 baseline、停止自有 OBS、分開回報 cleanup failure。W11-010 不啟動實機 OBS。
+13. Finalizer 的 develop-only `workflow_dispatch` 提供明確 gated `simulation_case`（`none`、`pass`、`fail`、`rerun`）；simulation 固定使用 `w11-010-simulation` namespace 與 real Issues API，只能建立／更新該隔離 projection，絕不改 production manifest、ticket、PR comment 或 retry state。`rerun` 必須 read-back 同一 simulation issue 且保持 failure count 不變。
 
-Tests/evidence：在測試 branch/workflow 中模擬一次 PASS、一次 FAIL、一次 rerun，驗證狀態與去重。
+Tests/evidence：在測試 branch/workflow 中模擬 PASS、FAIL、rerun、stale PASS、concurrent dedup、pagination、edited marker、partial API failure、provenance rejection，以及固定 namespace 的 simulation fail/rerun issue projection；另以硬體免費 fake pointer/OBS 驗證 production command-to-transform、bounded polling、baseline restore 與 cleanup failure。exact merged-SHA producer/finalizer 與隔離 live simulation 仍由 controller 在後續 acceptance phases 補足。
 
 ### W11-011 — Windows 11 實機 E2E certification
 
