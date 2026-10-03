@@ -1063,7 +1063,7 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: PR
+    status: Ready
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
     post_merge_registration:
@@ -1072,6 +1072,17 @@ tickets:
         - pr_number: 13
           predecessor_pr_number: null
           repair_issue_number: null
+    diagnostic_repair:
+      state: Ready
+      issue_number: 14
+      issue_url: https://github.com/Wells-sideproj/obs-voice-command-windows/issues/14
+      originating_pr_number: 13
+      originating_merged_sha: 00ab9d1438adbd206e43e85e031615a734eb68aa
+      failed_finalizer_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/37104847448
+      failure_class: authorization_unresolved
+      user_approved: true
+      code_retry_budget_consumed: false
+      scope: sanitized_http_error_diagnostics_only
     execution:
       escalation_threshold: low
     arbitration:
