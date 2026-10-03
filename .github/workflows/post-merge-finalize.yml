@@ -1,0 +1,71 @@
+name: Windows 11 Layer A post-merge finalizer
+
+on:
+  workflow_run:
+    workflows:
+      - Windows 11 Layer A post-merge producer
+    types:
+      - completed
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      producer_run_id:
+        description: （可選）供 authorized reconciliation 使用的 producer run id
+        required: false
+        type: string
+      producer_run_attempt:
+        description: （可選）供 authorized reconciliation 使用的 producer run attempt
+        required: false
+        type: string
+      simulation_case:
+        description: 隔離的 W11-010 Issues API simulation；絕不改變 production ticket state
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - pass
+          - fail
+          - rerun
+
+permissions: {}
+
+concurrency:
+  group: w11-010-post-merge-finalizer
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop') || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'develop') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      POST_MERGE_RUN_ID: ${{ github.event.workflow_run.id || inputs.producer_run_id }}
+      POST_MERGE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.producer_run_attempt }}
+      POST_MERGE_SIMULATION_CASE: ${{ inputs.simulation_case || 'none' }}
+    steps:
+      - name: Checkout protected develop
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: develop
+          persist-credentials: false
+
+      - name: 選擇 Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Reconcile 已註冊的 post-merge evidence
+        if: ${{ github.event_name == 'workflow_run' || inputs.simulation_case == '' || inputs.simulation_case == 'none' }}
+        run: python tools/post_merge_publisher.py
+
+      - name: 執行隔離的 W11-010 Issues API simulation
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && inputs.simulation_case != '' && inputs.simulation_case != 'none' }}
+        run: python tools/post_merge_publisher.py --simulation-case "$POST_MERGE_SIMULATION_CASE"

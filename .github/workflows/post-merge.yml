@@ -1,0 +1,234 @@
+name: Windows 11 Layer A post-merge producer
+
+on:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+env:
+  CI_STAGE: full
+  UV_VERSION: '0.11.8'
+
+jobs:
+  platform_matrix:
+    name: ${{ matrix.check_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: '3.12'
+            check_name: layer-a / windows-unit
+            platform: windows
+            python_io_encoding: utf-8
+          - os: macos-latest
+            python: '3.12'
+            check_name: layer-a / macos-regression
+            platform: macos
+            python_io_encoding: ''
+    env:
+      PYTHONIOENCODING: ${{ matrix.python_io_encoding }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Select Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Platform guard (Windows)
+        if: ${{ matrix.platform == 'windows' }}
+        shell: pwsh
+        run: |
+          if ($env:CI_STAGE -ne 'full') {
+            throw "Expected ci_stage=full, got ci_stage=$env:CI_STAGE"
+          }
+          if ($env:RUNNER_OS -ne 'Windows') {
+            throw "Expected Windows runner, got runner_os=$env:RUNNER_OS"
+          }
+          if ($env:PYTHONIOENCODING -ne 'utf-8') {
+            throw "Expected Windows PYTHONIOENCODING=utf-8"
+          }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @(
+            'ci_stage=full'
+            'platform=windows'
+            'runner_os=Windows'
+          ) -Encoding utf8
+
+      - name: Platform guard (macOS)
+        if: ${{ matrix.platform == 'macos' }}
+        shell: bash
+        run: |
+          if [[ "$CI_STAGE" != "full" ]]; then
+            echo "Expected ci_stage=full, got ci_stage=$CI_STAGE" >&2
+            exit 1
+          fi
+          if [[ "$RUNNER_OS" != "macOS" ]]; then
+            echo "Expected macOS runner, got runner_os=$RUNNER_OS" >&2
+            exit 1
+          fi
+          if [[ "${PYTHONIOENCODING:-}" == "utf-8" ]]; then
+            echo 'macOS must not inherit the Windows UTF-8 job setting' >&2
+            exit 1
+          fi
+          printf '%s\n' 'ci_stage=full' 'platform=macos' 'runner_os=macOS' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install locked uv version
+        run: python -m pip install --disable-pip-version-check "uv==${{ env.UV_VERSION }}"
+
+      - name: Log Windows CI context
+        if: ${{ matrix.platform == 'windows' }}
+        shell: pwsh
+        run: |
+          $pythonVersion = python --version
+          $uvVersion = uv --version
+          Write-Host "runner_os=$env:RUNNER_OS"
+          Write-Host 'platform=windows'
+          Write-Host "python_version=$pythonVersion"
+          Write-Host "uv_version=$uvVersion"
+          Write-Host "ci_stage=$env:CI_STAGE"
+
+      - name: Log macOS CI context
+        if: ${{ matrix.platform == 'macos' }}
+        shell: bash
+        run: |
+          python_version="$(python --version)"
+          uv_version="$(uv --version)"
+          printf '%s\n' "runner_os=$RUNNER_OS" 'platform=macos' "python_version=$python_version" "uv_version=$uv_version" "ci_stage=$CI_STAGE"
+
+      - name: Install locked project
+        run: uv sync --frozen
+
+      - name: Verify Windows imports stay Quartz-free
+        if: ${{ matrix.platform == 'windows' }}
+        shell: pwsh
+        run: |
+          uv run --frozen python -c "import sys; import obs_voice_command.os_zoom; import obs_voice_command.main; assert 'Quartz' not in sys.modules; print('Windows import smoke: PASS')"
+          uv run --frozen obs-voice-command --help
+
+      - name: Verify macOS imports and CLI
+        if: ${{ matrix.platform == 'macos' }}
+        shell: bash
+        run: |
+          uv run --frozen python -c "import obs_voice_command.os_zoom; import obs_voice_command.main; print('macOS import smoke: PASS')"
+          uv run --frozen obs-voice-command --help
+
+      - name: Run Windows hardware-free tests
+        if: ${{ matrix.platform == 'windows' }}
+        shell: pwsh
+        run: uv run --frozen python -m pytest tests -q
+
+      - name: Run macOS regression tests
+        if: ${{ matrix.platform == 'macos' }}
+        shell: bash
+        run: uv run --frozen python -m pytest tests -q
+
+  package:
+    name: layer-a / package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Select Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Require full stage
+        shell: bash
+        run: |
+          if [[ "$CI_STAGE" != "full" ]]; then
+            echo "Expected ci_stage=full, got ci_stage=$CI_STAGE" >&2
+            exit 1
+          fi
+          printf '%s\n' 'ci_stage=full' 'platform=package' "runner_os=$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install locked uv version
+        shell: bash
+        run: python -m pip install --disable-pip-version-check "uv==$UV_VERSION"
+
+      - name: Log package CI context
+        shell: bash
+        run: |
+          python_version="$(python --version)"
+          uv_version="$(uv --version)"
+          printf '%s\n' "runner_os=$RUNNER_OS" 'platform=package' "python_version=$python_version" "uv_version=$uv_version" "ci_stage=$CI_STAGE"
+
+      - name: Install locked project
+        shell: bash
+        run: uv sync --frozen
+
+      - name: Build wheel and source distribution
+        shell: bash
+        run: uv build
+
+      - name: Verify the built wheel outside the checkout
+        shell: bash
+        run: |
+          wheel_path="$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+          sdist_path="$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          test -n "$wheel_path"
+          test -n "$sdist_path"
+          artifact_dir="$(mktemp -d)"
+          artifact_env="$artifact_dir/venv"
+          uv venv "$artifact_env"
+          uv pip install --python "$artifact_env/bin/python" --no-deps "$wheel_path"
+          cd "$artifact_dir"
+          WHEEL_PATH="$wheel_path" "$artifact_env/bin/python" -c '
+          import importlib.metadata
+          import os
+          from pathlib import Path
+
+          import obs_voice_command
+          import obs_voice_command.mouse
+          import obs_voice_command.os_zoom
+          import obs_voice_command.platform
+          import obs_voice_command.platform.common
+          import obs_voice_command.platform.unsupported
+          import obs_voice_command.platform.windows
+
+          wheel_path = Path(os.environ["WHEEL_PATH"]).resolve()
+          distribution = importlib.metadata.distribution("obs-voice-command")
+          module_path = Path(obs_voice_command.__file__).resolve()
+          site_packages = Path(distribution.locate_file("")).resolve()
+
+          assert wheel_path.suffix == ".whl"
+          assert distribution.version in wheel_path.name
+          assert module_path.is_relative_to(site_packages), (module_path, site_packages)
+          assert Path(distribution.locate_file("obs_voice_command/os_zoom.py")).is_file()
+          print(f"built artifact import: PASS (wheel={wheel_path.name})")
+          '
+
+  required_gate:
+    name: required / gate
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: [platform_matrix, package]
+    steps:
+      - name: Require full stage and every Layer A job
+        shell: bash
+        env:
+          PLATFORM_MATRIX_RESULT: ${{ needs.platform_matrix.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          printf '%s\n' "ci_stage=$CI_STAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'platform_matrix=%s\npackage=%s\n' "$PLATFORM_MATRIX_RESULT" "$PACKAGE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$CI_STAGE" != "full" ]]; then
+            echo "required / gate: FAIL (expected ci_stage=full, got ci_stage=$CI_STAGE)" >&2
+            exit 1
+          fi
+          if [[ "$PLATFORM_MATRIX_RESULT" != "success" || "$PACKAGE_RESULT" != "success" ]]; then
+            echo 'required / gate: FAIL (platform matrix and package must report success)' >&2
+            exit 1
+          fi
+          echo 'required / gate: PASS (full Layer A matrix and package succeeded)' >> "$GITHUB_STEP_SUMMARY"

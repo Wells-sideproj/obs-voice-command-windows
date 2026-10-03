@@ -1,0 +1,60 @@
+name: 已驗證的 Layer A 修復
+description: 記錄 verified post-merge failure 後由 controller 管理的修復。
+title: "[Repair] "
+labels:
+  - type:repair
+  - status:ready
+body:
+  - type: markdown
+    attributes:
+      value: |
+        此表單只記錄 evidence。請勿貼上 token、password 或其他 secret。
+  - type: input
+    id: ticket-id
+    attributes:
+      label: Ticket ID
+      placeholder: W11-010
+    validations:
+      required: true
+  - type: input
+    id: failing-layer
+    attributes:
+      label: 失敗的 layer 或 check
+      placeholder: Layer A / required / gate
+    validations:
+      required: true
+  - type: input
+    id: commit-sha
+    attributes:
+      label: 失敗的 merged commit SHA
+      placeholder: 40-character SHA
+    validations:
+      required: true
+  - type: input
+    id: run-url
+    attributes:
+      label: Producer run URL
+      placeholder: https://github.com/...
+    validations:
+      required: true
+  - type: input
+    id: merged-pr
+    attributes:
+      label: Merged PR
+      placeholder: "#123"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 失敗的 jobs、steps 與 exact command
+      description: 只提供已清理 secret 的 evidence 與相關 log excerpt。
+    validations:
+      required: true
+  - type: textarea
+    id: rollback-hint
+    attributes:
+      label: Rollback 或 repair hint
+      description: 保持 protected develop history 完整；絕不 direct-push。
+    validations:
+      required: true

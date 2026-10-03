@@ -1,0 +1,36 @@
+{
+  "ticket_id": "W11-010",
+  "decision": "targeted_repair",
+  "phase": "pre_pr_trust_boundary_review",
+  "route": "windows_arbitrator",
+  "model": "gpt-6-astra",
+  "model_reasoning_effort": "medium",
+  "agent_id": "01a0ffe8-11e9-7df0-8ee3-49bd7ccc5737",
+  "inspected_local_head": "072b2a3a50571ce7c31d79ddd941583cdffe7896",
+  "inspected_state": "uncommitted W11-010 working tree; no PR or CI run",
+  "code_retry_consumed": 0,
+  "human_input_required": false,
+  "pr_gate": "blocked_until_directed_repairs_pass",
+  "root_cause": "Fake transport and reducer did not fully model GitHub REST response and attempt-history contracts; publication freshness, cross-ticket lineage, and nested cleanup reporting also need repair.",
+  "directed_repairs": [
+    "Use workflow filename as the GitHub workflow selector, then verify returned full path.",
+    "Join source run check_suite_id to check-suite id; do not require a synthetic suite.workflow_run.id.",
+    "Decode GitHub Contents Base64 after removing permitted line breaks.",
+    "Use attempt-specific run and jobs endpoints to reconstruct history for one run ID; missing attempt evidence blocks retry accounting.",
+    "Immediately before PASS, issue close, or repair mutation, revalidate protected registration, merged PR, source run attempt, and latest relevant result.",
+    "Discover the uniquely registered originating ticket from protected manifest; never treat Layer A alone as Done for Layer B profiles.",
+    "Preserve inner HarnessFailure.cleanup_error separately from OBS disconnect and process cleanup errors."
+  ],
+  "required_fake_tests": [
+    "realistic GitHub REST response fixtures and actual publisher entrypoint success",
+    "same run ID code failure then infrastructure failure or PASS, plus delayed events",
+    "source change after verification but before publication",
+    "second registered ticket PASS/FAIL without Layer B completion claim",
+    "nested baseline and outer process cleanup failures"
+  ],
+  "deferred_verification": [
+    "exact merged-SHA protected producer and finalizer",
+    "effective GitHub token permissions and isolated live PASS/FAIL/rerun issue read-back",
+    "real OBS certification in W11-011"
+  ]
+}
