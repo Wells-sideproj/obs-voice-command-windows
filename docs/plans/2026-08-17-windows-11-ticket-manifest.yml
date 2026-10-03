@@ -1063,9 +1063,15 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: Ready
+    status: PR
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
+    post_merge_registration:
+      version: 1
+      attempts:
+        - pr_number: 13
+          predecessor_pr_number: null
+          repair_issue_number: null
     execution:
       escalation_threshold: low
     arbitration:
