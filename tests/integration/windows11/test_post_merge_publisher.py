@@ -8,13 +8,18 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 import pytest
 
 from tools.post_merge_publisher import (
     DEFAULT_REQUIRED_JOBS,
+    ApiError,
     PASS_MARKER,
     REPAIR_MARKER,
     GithubApi,
@@ -25,6 +30,8 @@ from tools.post_merge_publisher import (
     SIMULATION_MARKER,
     SIMULATION_NAMESPACE,
     SimulationPublisher,
+    UrllibTransport,
+    _cli,
     lineage_key,
 )
 
@@ -45,6 +52,130 @@ CODE_STEP_BY_JOB = {
     "layer-a / package": "Build wheel and source distribution",
     "required / gate": "Require full stage and every Layer A job",
 }
+
+
+def _http_error(body: Any, headers: Mapping[str, str], *, status: int = 403) -> HTTPError:
+    response_headers = Message()
+    for name, value in headers.items():
+        response_headers[name] = value
+    return HTTPError(
+        "https://api.github.com/repos/Wells-sideproj/obs-voice-command-windows",
+        status,
+        "Forbidden",
+        response_headers,
+        BytesIO(json.dumps(body).encode("utf-8")),
+    )
+
+
+def test_urllib_http_error_exposes_only_allowlisted_safe_diagnostics() -> None:
+    token = "CURR_SENTINEL"
+    error = _http_error(
+        {
+            "message": "Resource not accessible by integration",
+            "documentation_url": "https://docs.github.com/rest/actions/workflows",
+            "status": 403,
+            "ignored": f"body-secret={token}",
+        },
+        {
+            "X-GitHub-Request-Id": "abcd:123456:abcdef:7890ab:12345678",
+            "X-Accepted-GitHub-Permissions": "issues=write,contents=read; pull_requests=read, contents=read",
+            "X-RateLimit-Remaining": "0",
+            "Retry-After": "60",
+            "X-Not-Allowlisted": "response-header-secret",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+
+    with patch("tools.post_merge_publisher.urlopen", side_effect=error):
+        with pytest.raises(ApiError) as raised:
+            UrllibTransport(token).request("GET", "/repos/Wells-sideproj/obs-voice-command-windows")
+
+    diagnostic = str(raised.value)
+    assert raised.value.status == 403
+    assert raised.value.category == "blocked"
+    assert "HTTP 403" in diagnostic
+    assert "status=403" in diagnostic
+    assert "message=Resource not accessible by integration" in diagnostic
+    assert "documentation_url=https://docs.github.com/rest/actions/workflows" in diagnostic
+    assert "X-GitHub-Request-Id=abcd:123456:abcdef:7890ab:12345678" in diagnostic
+    assert (
+        "X-Accepted-GitHub-Permissions=issues=write, contents=read; "
+        "pull_requests=read, contents=read"
+    ) in diagnostic
+    assert "X-RateLimit-Remaining=0" in diagnostic
+    assert "Retry-After=60" in diagnostic
+    assert "X-Not-Allowlisted" not in diagnostic
+    assert "response-header-secret" not in diagnostic
+    assert token not in diagnostic
+    assert "Authorization" not in diagnostic
+
+
+def test_urllib_http_error_rejects_injection_and_unsafe_values_but_still_fails_403() -> None:
+    current_token = "CURR_SENTINEL"
+    message_secret = "MSG_SENTINEL"
+    documentation_secret = "DOC_SENTINEL"
+    permission_secret = "PERM_SENTINEL"
+    request_id_secret = "REQ_SENTINEL"
+    error = _http_error(
+        {
+            "message": f"Bearer {message_secret}",
+            "documentation_url": f"https://docs.github.com/{documentation_secret}",
+            "status": 403,
+            "ignored": f"not-allowlisted={current_token}",
+        },
+        {
+            "X-GitHub-Request-Id": request_id_secret,
+            "X-Accepted-GitHub-Permissions": f"issues=write, token={permission_secret}",
+            "X-RateLimit-Remaining": "0; injected",
+            "Retry-After": "after=token",
+        },
+    )
+
+    with patch("tools.post_merge_publisher.urlopen", side_effect=error):
+        with pytest.raises(ApiError) as raised:
+            UrllibTransport(current_token).request("GET", "/repos/Wells-sideproj/obs-voice-command-windows")
+
+    diagnostic = str(raised.value)
+    assert raised.value.status == 403
+    assert raised.value.category == "blocked"
+    assert "HTTP 403" in diagnostic
+    assert "status=403" in diagnostic
+    assert "Bearer" not in diagnostic
+    assert "docs.github.com" not in diagnostic
+    assert "not-allowlisted" not in diagnostic
+    assert "X-GitHub-Request-Id" not in diagnostic
+    assert "X-Accepted-GitHub-Permissions" not in diagnostic
+    assert "X-RateLimit-Remaining" not in diagnostic
+    assert "Retry-After" not in diagnostic
+    assert "Authorization" not in diagnostic
+    assert current_token not in diagnostic
+    assert message_secret not in diagnostic
+    assert documentation_secret not in diagnostic
+    assert permission_secret not in diagnostic
+    assert request_id_secret not in diagnostic
+
+
+def test_cli_keeps_http_403_fail_closed_with_nonzero_exit(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    token = "CLI_SENTINEL"
+
+    def raise_forbidden(*_: Any, **__: Any) -> None:
+        raise _http_error({"message": "forbidden", "status": 403}, {"Authorization": f"Bearer {token}"})
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    monkeypatch.setenv("POST_MERGE_RUN_ID", "5001")
+    monkeypatch.setenv("POST_MERGE_RUN_ATTEMPT", "1")
+    monkeypatch.setenv("GITHUB_RUN_ID", "6001")
+    monkeypatch.setattr(sys, "argv", ["post_merge_publisher.py"])
+
+    with patch("tools.post_merge_publisher.urlopen", side_effect=raise_forbidden):
+        result = _cli()
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert '"status": "blocked"' in captured.err
+    assert "HTTP 403" in captured.err
+    assert token not in captured.err
 
 
 def _manifest(*, attempts: int = 1) -> str:

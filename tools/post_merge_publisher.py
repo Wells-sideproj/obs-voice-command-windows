@@ -19,7 +19,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -51,6 +51,77 @@ SIMULATION_NAMESPACE = "w11-010-simulation"
 SIMULATION_CASES = ("pass", "fail", "rerun")
 VALID_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 NULL = {"null", "~"}
+MAX_API_ERROR_DETAIL_LENGTH = 1024
+MAX_HTTP_ERROR_MESSAGE_LENGTH = 240
+MAX_HTTP_ERROR_DOCUMENTATION_URL_LENGTH = 256
+MAX_HTTP_ERROR_REQUEST_ID_LENGTH = 128
+MAX_HTTP_ERROR_PERMISSIONS_LENGTH = 256
+MAX_HTTP_ERROR_NUMERIC_HEADER_LENGTH = 10
+SAFE_GITHUB_ERROR_MESSAGES = frozenset(
+    {
+        "API rate limit exceeded",
+        "Bad credentials",
+        "Forbidden",
+        "Internal Server Error",
+        "Not Found",
+        "Problems parsing JSON",
+        "Requires authentication",
+        "Resource not accessible by integration",
+        "Resource not accessible by personal access token",
+        "Server Error",
+        "Unprocessable Entity",
+        "Validation Failed",
+        "You have exceeded a secondary rate limit.",
+    }
+)
+SAFE_DOCUMENTATION_PATHS = frozenset(
+    {
+        "/en/rest/actions/workflows",
+        "/en/rest/using-the-rest-api/troubleshooting-the-rest-api",
+        "/rest/actions/workflows",
+        "/rest/using-the-rest-api/troubleshooting-the-rest-api",
+    }
+)
+KNOWN_GITHUB_PERMISSION_NAMES = frozenset(
+    {
+        "actions",
+        "administration",
+        "attestations",
+        "checks",
+        "code",
+        "code-scanning-alerts",
+        "code_scanning_alerts",
+        "commit-statuses",
+        "commit_statuses",
+        "contents",
+        "custom-properties",
+        "custom_properties",
+        "dependabot-alerts",
+        "dependabot_alerts",
+        "deployments",
+        "discussions",
+        "environments",
+        "issues",
+        "metadata",
+        "pages",
+        "pull-requests",
+        "pull_requests",
+        "repository-projects",
+        "repository_projects",
+        "security-events",
+        "security_events",
+        "secret-scanning-alerts",
+        "secret_scanning_alerts",
+        "secrets",
+        "statuses",
+        "vulnerability-alerts",
+        "vulnerability_alerts",
+        "workflows",
+    }
+)
+SAFE_GITHUB_PERMISSION_VALUES = frozenset({"read", "write"})
+SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9]{4}:[A-Za-z0-9]{6}:[A-Za-z0-9]{6}:[A-Za-z0-9]{6}:[A-Za-z0-9]{8}")
+SAFE_NUMERIC_HEADER = re.compile(r"\d{1,10}")
 
 
 class PublisherError(RuntimeError):
@@ -63,7 +134,7 @@ class PublisherError(RuntimeError):
 
 class ApiError(PublisherError):
     def __init__(self, method: str, path: str, status: int, detail: str) -> None:
-        safe_detail = detail[:240].replace("\r", " ").replace("\n", " ")
+        safe_detail = detail[:MAX_API_ERROR_DETAIL_LENGTH].replace("\r", " ").replace("\n", " ")
         category = "infrastructure" if status >= 500 or status == 429 else "blocked"
         super().__init__(
             f"GitHub API {method} {path} returned HTTP {status}: {safe_detail}",
@@ -72,6 +143,165 @@ class ApiError(PublisherError):
         self.method = method
         self.path = path
         self.status = status
+
+
+def _bounded_text(value: Any, *, limit: int) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > limit:
+        return None
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _safe_error_message(value: Any, *, token: str) -> str | None:
+    message = _bounded_text(value, limit=MAX_HTTP_ERROR_MESSAGE_LENGTH)
+    if message is None or (token and token in message) or message not in SAFE_GITHUB_ERROR_MESSAGES:
+        return None
+    return message
+
+
+def _safe_documentation_url(value: Any, *, token: str) -> str | None:
+    url = _bounded_text(value, limit=MAX_HTTP_ERROR_DOCUMENTATION_URL_LENGTH)
+    if url is None or (token and token in url) or any(character.isspace() for character in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "docs.github.com"
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in SAFE_DOCUMENTATION_PATHS
+        ):
+            return None
+    except ValueError:
+        return None
+    return url
+
+
+def _safe_status(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if 100 <= value <= 599 else None
+    value = _bounded_text(value, limit=3)
+    return value if value is not None and value.isdigit() and 100 <= int(value) <= 599 else None
+
+
+def _response_header(headers: Any, name: str) -> str | None:
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        try:
+            value = getter(name)
+        except (AttributeError, TypeError):
+            value = None
+        if isinstance(value, str):
+            return value
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    try:
+        for key, value in items():
+            if isinstance(key, str) and key.lower() == name.lower() and isinstance(value, str):
+                return value
+    except (AttributeError, TypeError):
+        return None
+    return None
+
+
+def _safe_response_header(
+    headers: Any,
+    name: str,
+    *,
+    token: str,
+    limit: int,
+    pattern: re.Pattern[str],
+) -> str | None:
+    value = _bounded_text(_response_header(headers, name), limit=limit)
+    if value is None or (token and token in value) or not pattern.fullmatch(value):
+        return None
+    return value
+
+
+def _safe_accepted_permissions(value: Any, *, token: str) -> str | None:
+    permissions = _bounded_text(value, limit=MAX_HTTP_ERROR_PERMISSIONS_LENGTH)
+    if permissions is None or (token and token in permissions):
+        return None
+
+    groups: list[str] = []
+    for group in permissions.split(";"):
+        pairs = [pair.strip() for pair in group.split(",")]
+        if not pairs or any(not pair or pair.count("=") != 1 for pair in pairs):
+            return None
+        seen_names: set[str] = set()
+        canonical_pairs: list[str] = []
+        for pair in pairs:
+            name, value = (part.strip() for part in pair.split("="))
+            if (
+                not name
+                or not value
+                or name in seen_names
+                or name not in KNOWN_GITHUB_PERMISSION_NAMES
+                or value not in SAFE_GITHUB_PERMISSION_VALUES
+            ):
+                return None
+            seen_names.add(name)
+            canonical_pairs.append(f"{name}={value}")
+        groups.append(", ".join(canonical_pairs))
+    return "; ".join(groups)
+
+
+def _http_error_diagnostics(status: Any, headers: Any, body: Any, *, token: str) -> str:
+    http_status = _safe_status(status)
+    body_status = _safe_status(body.get("status")) if isinstance(body, dict) else None
+    if body_status is not None and body_status != http_status:
+        body_status = None
+
+    parts: list[str] = []
+    if body_status is not None:
+        parts.append(f"status={body_status}")
+    elif http_status is not None:
+        parts.append(f"status={http_status}")
+
+    if isinstance(body, dict):
+        message = _safe_error_message(body.get("message"), token=token)
+        documentation_url = _safe_documentation_url(body.get("documentation_url"), token=token)
+        if message is not None:
+            parts.append(f"message={message}")
+        if documentation_url is not None:
+            parts.append(f"documentation_url={documentation_url}")
+
+    allowlisted_headers = (
+        (
+            "X-GitHub-Request-Id",
+            MAX_HTTP_ERROR_REQUEST_ID_LENGTH,
+            SAFE_REQUEST_ID,
+        ),
+        (
+            "X-RateLimit-Remaining",
+            MAX_HTTP_ERROR_NUMERIC_HEADER_LENGTH,
+            SAFE_NUMERIC_HEADER,
+        ),
+        (
+            "Retry-After",
+            MAX_HTTP_ERROR_NUMERIC_HEADER_LENGTH,
+            SAFE_NUMERIC_HEADER,
+        ),
+    )
+    for name, limit, pattern in allowlisted_headers:
+        value = _safe_response_header(headers, name, token=token, limit=limit, pattern=pattern)
+        if value is not None:
+            parts.append(f"{name}={value}")
+    permissions = _safe_accepted_permissions(
+        _response_header(headers, "X-Accepted-GitHub-Permissions"),
+        token=token,
+    )
+    if permissions is not None:
+        parts.append(f"X-Accepted-GitHub-Permissions={permissions}")
+    return "; ".join(parts) or "HTTP error"
 
 
 @dataclass(frozen=True)
@@ -138,9 +368,14 @@ class UrllibTransport:
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
-                body = {"message": raw.decode("utf-8", errors="replace")}
-            detail = body.get("message", "HTTP error") if isinstance(body, dict) else "HTTP error"
-            raise ApiError(method, path, exc.code, str(detail)) from exc
+                body = {}
+            detail = _http_error_diagnostics(
+                exc.code,
+                getattr(exc, "headers", None),
+                body,
+                token=self._token,
+            )
+            raise ApiError(method, path, exc.code, detail) from exc
         except (OSError, URLError, TimeoutError) as exc:
             raise PublisherError(f"GitHub API transport failed: {type(exc).__name__}", category="infrastructure") from exc
 
