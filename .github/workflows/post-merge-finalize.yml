@@ -62,9 +62,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Reconcile 已註冊的 post-merge evidence
+      - name: Reconcile 已註冊的 post-merge evidence 或 gated paired diagnostic
         if: ${{ github.event_name == 'workflow_run' || inputs.simulation_case == '' || inputs.simulation_case == 'none' }}
-        run: python tools/post_merge_publisher.py
+        run: python tools/post_merge_publisher.py --diagnostic-aware
 
       - name: 執行隔離的 W11-010 Issues API simulation
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop' && inputs.simulation_case != '' && inputs.simulation_case != 'none' }}
