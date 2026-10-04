@@ -397,6 +397,9 @@ status_values:
   - Merged
   - Done
 required_check: required / gate
+paired_comment_diagnostic_registration:
+  version: 1
+  pr_number: 18
 orchestrator_rules:
   stop_after_ticket_done: null
   execution_state: running

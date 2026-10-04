@@ -49,6 +49,11 @@ REPAIR_MARKER = "<!-- w11-010-repair:v1 -->"
 SIMULATION_MARKER = "<!-- w11-010-simulation:v1 -->"
 SIMULATION_NAMESPACE = "w11-010-simulation"
 SIMULATION_CASES = ("pass", "fail", "rerun")
+PAIRED_COMMENT_DIAGNOSTIC_MARKER = "<!-- w11-010-paired-comment-diagnostic:v1 -->"
+PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE = "w11-010-paired-comment-diagnostic"
+PAIRED_COMMENT_DIAGNOSTIC_VERSION = 1
+PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER = 17
+PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER = 13
 VALID_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 NULL = {"null", "~"}
 MAX_API_ERROR_DETAIL_LENGTH = 1024
@@ -304,6 +309,54 @@ def _http_error_diagnostics(status: Any, headers: Any, body: Any, *, token: str)
     return "; ".join(parts) or "HTTP error"
 
 
+def _safe_api_error_detail(error: PublisherError) -> str:
+    """Keep the existing allowlisted HTTP evidence without echoing bodies."""
+
+    if not isinstance(error, ApiError):
+        return f"category={error.category}"
+    prefix = (
+        f"GitHub API {error.method} {error.path} returned HTTP {error.status}: "
+    )
+    rendered = str(error)
+    detail = rendered[len(prefix) :] if rendered.startswith(prefix) else ""
+    if detail in SAFE_GITHUB_ERROR_MESSAGES:
+        return f"HTTP {error.status}; message={detail}"
+    safe_parts: list[str] = [f"HTTP {error.status}"]
+    for part in detail.split("; "):
+        if part.startswith("status="):
+            status = _safe_status(part.removeprefix("status="))
+            if status == str(error.status):
+                safe_parts.append(f"status={status}")
+        elif part.startswith("message="):
+            message = _safe_error_message(part.removeprefix("message="), token="")
+            if message is not None:
+                safe_parts.append(f"message={message}")
+        elif part.startswith("documentation_url="):
+            url = _safe_documentation_url(part.removeprefix("documentation_url="), token="")
+            if url is not None:
+                safe_parts.append(f"documentation_url={url}")
+        elif part.startswith("X-GitHub-Request-Id="):
+            request_id = part.removeprefix("X-GitHub-Request-Id=")
+            if SAFE_REQUEST_ID.fullmatch(request_id):
+                safe_parts.append(f"X-GitHub-Request-Id={request_id}")
+        elif part.startswith("X-Accepted-GitHub-Permissions="):
+            permissions = _safe_accepted_permissions(
+                part.removeprefix("X-Accepted-GitHub-Permissions="),
+                token="",
+            )
+            if permissions is not None:
+                safe_parts.append(f"X-Accepted-GitHub-Permissions={permissions}")
+        elif part.startswith("X-RateLimit-Remaining="):
+            remaining = part.removeprefix("X-RateLimit-Remaining=")
+            if SAFE_NUMERIC_HEADER.fullmatch(remaining):
+                safe_parts.append(f"X-RateLimit-Remaining={remaining}")
+        elif part.startswith("Retry-After="):
+            retry_after = part.removeprefix("Retry-After=")
+            if SAFE_NUMERIC_HEADER.fullmatch(retry_after):
+                safe_parts.append(f"Retry-After={retry_after}")
+    return "; ".join(safe_parts)
+
+
 @dataclass(frozen=True)
 class HttpResponse:
     status: int
@@ -483,6 +536,12 @@ class GithubApi:
         body = self.get(f"/repos/{self.repository}/pulls/{number}")
         if not isinstance(body, dict):
             raise PublisherError("pull request API returned malformed data")
+        return body
+
+    def issue(self, number: int) -> Mapping[str, Any]:
+        body = self.get(f"/repos/{self.repository}/issues/{number}")
+        if not isinstance(body, dict):
+            raise PublisherError("issue API returned malformed data")
         return body
 
     def branch_tip(self, branch: str) -> str:
@@ -672,6 +731,14 @@ class Registration:
         return self.attempts[0].pr_number
 
 
+@dataclass(frozen=True)
+class PairedCommentDiagnosticRegistration:
+    """Controller-owned opt-in for the dormant paired comment diagnostic."""
+
+    version: int
+    pr_number: int
+
+
 def parse_registration(manifest: str, ticket_id: str) -> Registration:
     """Parse only the deliberately narrow registration block, fail closed."""
 
@@ -744,6 +811,51 @@ def parse_registration(manifest: str, ticket_id: str) -> Registration:
     )
     validate_registration(registration)
     return registration
+
+
+def parse_paired_comment_diagnostic_registration(
+    manifest: str,
+) -> PairedCommentDiagnosticRegistration | None:
+    """Parse the optional controller-owned diagnostic registration.
+
+    The block is deliberately outside the ticket list so it cannot be
+    mistaken for W11-010 production registration.  Absence is the safe,
+    dormant default; a present but malformed block fails closed.
+    """
+
+    lines = manifest.splitlines()
+    matches = [
+        index
+        for index, line in enumerate(lines)
+        if line == "paired_comment_diagnostic_registration:"
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PublisherError(
+            "manifest must contain exactly one paired comment diagnostic registration"
+        )
+    index = matches[0] + 1
+    child: list[str] = []
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith("  "):
+            break
+        if line.strip():
+            child.append(line)
+        index += 1
+    if len(child) != 2:
+        raise PublisherError("paired comment diagnostic registration has an unexpected schema")
+    version_match = re.fullmatch(r"  version:\s*(\S+)\s*", child[0])
+    pr_match = re.fullmatch(r"  pr_number:\s*(\S+)\s*", child[1])
+    if not version_match or version_match.group(1) != str(PAIRED_COMMENT_DIAGNOSTIC_VERSION):
+        raise PublisherError("paired comment diagnostic registration version is invalid")
+    if not pr_match or not pr_match.group(1).isdigit() or int(pr_match.group(1)) <= 0:
+        raise PublisherError("paired comment diagnostic registration pr_number is invalid")
+    return PairedCommentDiagnosticRegistration(
+        version=PAIRED_COMMENT_DIAGNOSTIC_VERSION,
+        pr_number=int(pr_match.group(1)),
+    )
 
 
 def registered_registrations(manifest: str) -> dict[str, Registration]:
@@ -891,6 +1003,379 @@ class PublisherResult:
             "infrastructure_failures": self.infrastructure_failures,
             "evidence": dict(self.evidence),
         }
+
+
+@dataclass(frozen=True)
+class PairedCommentDiagnosticResult:
+    source_run_id: int
+    source_run_attempt: int
+    source_sha: str
+    source_pr_number: int
+    created_targets: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": "paired_comment_diagnostic",
+            "namespace": PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE,
+            "source_run_id": self.source_run_id,
+            "source_run_attempt": self.source_run_attempt,
+            "source_sha": self.source_sha,
+            "source_pr_number": self.source_pr_number,
+            "created_targets": list(self.created_targets),
+            "read_back": True,
+            "production_projection_mutated": False,
+            "production_retry_state_mutated": False,
+        }
+
+
+class PairedCommentDiagnostic:
+    """Bounded, non-production paired comment diagnostic.
+
+    This intentionally uses ``GithubApi``/``UrllibTransport`` from the
+    trusted finalizer.  It never creates, updates, labels, or closes an issue
+    and never writes a W11-010 production projection.
+    """
+
+    _targets = (
+        ("issue", PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER),
+        ("pull_request", PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER),
+    )
+
+    def __init__(
+        self,
+        api: GithubApi,
+        config: PublisherConfig,
+        registration: PairedCommentDiagnosticRegistration,
+    ) -> None:
+        self.api = api
+        self.config = config
+        self.registration = registration
+
+    def _trusted_author(self, value: Mapping[str, Any]) -> bool:
+        user = value.get("user")
+        return (
+            isinstance(user, dict)
+            and user.get("type") == "Bot"
+            and user.get("login") in self.config.publisher_logins
+        )
+
+    def _validate_target(self, kind: str, number: int) -> None:
+        if kind == "issue":
+            target = self.api.issue(number)
+            if target.get("number") != number or target.get("state") != "closed":
+                raise PublisherError(f"diagnostic issue #{number} is not verified closed")
+            if "pull_request" in target:
+                raise PublisherError(f"diagnostic target #{number} is a pull request, not an issue")
+            expected_path = f"/{self.config.repository}/issues/{number}"
+        elif kind == "pull_request":
+            target = self.api.pull(number)
+            if target.get("number") != number or target.get("state") != "closed":
+                raise PublisherError(f"diagnostic PR #{number} is not verified closed")
+            expected_path = f"/{self.config.repository}/pull/{number}"
+        else:
+            raise PublisherError("paired comment diagnostic target kind is invalid")
+        url = target.get("html_url")
+        if not isinstance(url, str) or url != f"https://github.com{expected_path}":
+            raise PublisherError(f"diagnostic target #{number} URL is not canonical")
+
+    def _payload(
+        self,
+        *,
+        kind: str,
+        number: int,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> dict[str, Any]:
+        return {
+            "kind": "w11-010-paired-comment-diagnostic",
+            "version": PAIRED_COMMENT_DIAGNOSTIC_VERSION,
+            "namespace": PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE,
+            "repository": self.config.repository,
+            "production_projection": False,
+            "source_pr_number": source_pull.number,
+            "source_sha": source_run.sha,
+            "source_run_id": source_run.run_id,
+            "source_run_attempt": source_run.run_attempt,
+            "target_kind": kind,
+            "target_number": number,
+        }
+
+    def _body(
+        self,
+        *,
+        kind: str,
+        number: int,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> str:
+        payload = self._payload(
+            kind=kind,
+            number=number,
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        return "\n".join(
+            [
+                PAIRED_COMMENT_DIAGNOSTIC_MARKER,
+                "```json",
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                "```",
+                "",
+                "Bounded non-production W11-010 comment permission diagnostic.",
+                "This comment is not a completion marker and does not change ticket or retry state.",
+            ]
+        )
+
+    def _validate_comment(
+        self,
+        comment: Mapping[str, Any],
+        *,
+        kind: str,
+        number: int,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> None:
+        payload = self._validate_comment_shape(comment, kind=kind, number=number)
+        expected = self._payload(
+            kind=kind,
+            number=number,
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        if payload != expected:
+            raise PublisherError("paired diagnostic marker payload does not match the exact source")
+
+    def _validate_comment_shape(
+        self,
+        comment: Mapping[str, Any],
+        *,
+        kind: str,
+        number: int,
+    ) -> Mapping[str, Any]:
+        if not self._trusted_author(comment):
+            raise PublisherError("paired diagnostic marker belongs to an untrusted author")
+        payload = _parse_machine_payload(comment.get("body"), PAIRED_COMMENT_DIAGNOSTIC_MARKER)
+        if payload is None:
+            raise PublisherError("paired diagnostic marker is missing its payload")
+        expected = {
+            "kind": "w11-010-paired-comment-diagnostic",
+            "version": PAIRED_COMMENT_DIAGNOSTIC_VERSION,
+            "namespace": PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE,
+            "repository": self.config.repository,
+            "production_projection": False,
+            "target_kind": kind,
+            "target_number": number,
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise PublisherError("paired diagnostic marker payload does not match its target")
+        expected_keys = set(expected) | {
+            "source_pr_number",
+            "source_sha",
+            "source_run_id",
+            "source_run_attempt",
+        }
+        if set(payload) != expected_keys:
+            raise PublisherError("paired diagnostic marker payload schema is invalid")
+        if (
+            _positive_int(payload.get("source_pr_number"), "paired diagnostic source PR")
+            != self.registration.pr_number
+        ):
+            raise PublisherError("paired diagnostic marker source PR does not match registration")
+        _require_sha(payload.get("source_sha"), "paired diagnostic source SHA")
+        _positive_int(payload.get("source_run_id"), "paired diagnostic source run id")
+        _positive_int(payload.get("source_run_attempt"), "paired diagnostic source run attempt")
+        return payload
+
+    def _find_comment(
+        self,
+        *,
+        kind: str,
+        number: int,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+        require_exact_source: bool = True,
+    ) -> Mapping[str, Any] | None:
+        matches: list[Mapping[str, Any]] = []
+        for comment in self.api.issue_comments(number):
+            body = comment.get("body")
+            if not isinstance(body, str) or PAIRED_COMMENT_DIAGNOSTIC_MARKER not in body:
+                continue
+            if require_exact_source:
+                self._validate_comment(
+                    comment,
+                    kind=kind,
+                    number=number,
+                    source_run=source_run,
+                    source_pull=source_pull,
+                )
+            else:
+                self._validate_comment_shape(comment, kind=kind, number=number)
+            matches.append(comment)
+        if len(matches) > 1:
+            raise PublisherError(
+                f"multiple paired diagnostic comments exist for {kind} #{number}"
+            )
+        return matches[0] if matches else None
+
+    def _write_failure(
+        self,
+        *,
+        kind: str,
+        number: int,
+        write_error: PublisherError,
+        readback_error: PublisherError | None = None,
+    ) -> PublisherError:
+        detail = _safe_api_error_detail(write_error)
+        if readback_error is not None:
+            detail = f"{detail}; readback={_safe_api_error_detail(readback_error)}"
+        category = (
+            readback_error.category if readback_error is not None else write_error.category
+        )
+        return PublisherError(
+            f"paired diagnostic comment write target={kind}#{number} "
+            f"was not confirmed by read-back; {detail}",
+            category=category,
+        )
+
+    def _ensure_comment(
+        self,
+        *,
+        kind: str,
+        number: int,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> bool:
+        if self._find_comment(
+            kind=kind,
+            number=number,
+            source_run=source_run,
+            source_pull=source_pull,
+            require_exact_source=False,
+        ) is not None:
+            return False
+        body = self._body(
+            kind=kind,
+            number=number,
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        try:
+            self.api.create_comment(number, body)
+        except PublisherError as exc:
+            # A POST may have reached GitHub even when the client received no
+            # usable response.  Read once and stop; never retry the POST.
+            try:
+                confirmed = self._find_comment(
+                    kind=kind,
+                    number=number,
+                    source_run=source_run,
+                    source_pull=source_pull,
+                )
+            except PublisherError as readback_exc:
+                raise self._write_failure(
+                    kind=kind,
+                    number=number,
+                    write_error=exc,
+                    readback_error=readback_exc,
+                ) from None
+            if confirmed is not None:
+                return True
+            raise self._write_failure(
+                kind=kind,
+                number=number,
+                write_error=exc,
+            ) from None
+        # Even a successful HTTP response is followed by one authoritative
+        # read-back.  A missing marker is a failed diagnostic, not a reason to
+        # issue a second POST.
+        confirmed = self._find_comment(
+            kind=kind,
+            number=number,
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        if confirmed is None:
+            raise PublisherError("paired diagnostic comment was not found in read-back")
+        return True
+
+    def run(self, source_run: VerifiedRun, source_pull: VerifiedPull) -> PairedCommentDiagnosticResult:
+        if self.config.repository.lower() != CANONICAL_REPOSITORY.lower():
+            raise PublisherError("paired comment diagnostic requires the canonical repository")
+        if source_pull.number != self.registration.pr_number:
+            raise PublisherError("source PR does not match the controller diagnostic registration")
+        for kind, number in self._targets:
+            self._validate_target(kind, number)
+        created_targets: list[str] = []
+        with PostMergePublisher._mutation_lock:
+            existing = {
+                (kind, number): self._find_comment(
+                    kind=kind,
+                    number=number,
+                    source_run=source_run,
+                    source_pull=source_pull,
+                    require_exact_source=False,
+                )
+                for kind, number in self._targets
+            }
+            if any(value is not None for value in existing.values()):
+                missing = [
+                    f"{kind}#{number}"
+                    for kind, number in self._targets
+                    if existing[(kind, number)] is None
+                ]
+                if missing:
+                    raise PublisherError(
+                        "paired diagnostic probe already started at issue#17; "
+                        "refusing all further POSTs; missing "
+                        + ", ".join(missing)
+                    )
+                for kind, number in self._targets:
+                    existing_comment = existing[(kind, number)]
+                    if existing_comment is None:
+                        raise PublisherError(
+                            "paired diagnostic probe fence changed while reading both targets"
+                        )
+                    self._validate_comment(
+                        existing_comment,
+                        kind=kind,
+                        number=number,
+                        source_run=source_run,
+                        source_pull=source_pull,
+                    )
+                    self._validate_target(kind, number)
+                return PairedCommentDiagnosticResult(
+                    source_run_id=source_run.run_id,
+                    source_run_attempt=source_run.run_attempt,
+                    source_sha=source_run.sha,
+                    source_pr_number=source_pull.number,
+                    created_targets=(),
+                )
+            for kind, number in self._targets:
+                if self._ensure_comment(
+                    kind=kind,
+                    number=number,
+                    source_run=source_run,
+                    source_pull=source_pull,
+                ):
+                    created_targets.append(f"{kind}#{number}")
+            for kind, number in self._targets:
+                self._validate_target(kind, number)
+                if self._find_comment(
+                    kind=kind,
+                    number=number,
+                    source_run=source_run,
+                    source_pull=source_pull,
+                ) is None:
+                    raise PublisherError(
+                        f"paired diagnostic comment for {kind} #{number} was not read back"
+                    )
+        return PairedCommentDiagnosticResult(
+            source_run_id=source_run.run_id,
+            source_run_attempt=source_run.run_attempt,
+            source_sha=source_run.sha,
+            source_pr_number=source_pull.number,
+            created_targets=tuple(created_targets),
+        )
 
 
 class PostMergePublisher:
@@ -1796,6 +2281,40 @@ class PostMergePublisher:
             },
         )
 
+    def reconcile_diagnostic_or_normal(
+        self,
+        preferred_run_id: int | None,
+        preferred_run_attempt: int | None,
+        *,
+        event_name: str,
+    ) -> PairedCommentDiagnosticResult | list[PublisherResult]:
+        """Run the gated paired probe or preserve normal reconciliation.
+
+        The diagnostic branch is reachable only from a ``workflow_run``
+        delivery, a controller-supplied registration whose PR is the exact
+        merged PR for this trusted producer run, and a producer/check-suite
+        result whose verified quality is ``pass``.  Every other context uses
+        the existing reducer, including normal failure handling.
+        """
+
+        if event_name != "workflow_run" or preferred_run_id is None:
+            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
+        protected_tip = self.api.branch_tip("develop")
+        protected_manifest = self.api.manifest(self.config.manifest_path, protected_tip)
+        registration = parse_paired_comment_diagnostic_registration(protected_manifest)
+        if registration is None:
+            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
+        source_run = self._verify_run(preferred_run_id, preferred_run_attempt)
+        source_pull = self._verified_pull_for_sha(source_run.sha)
+        if source_pull.number != registration.pr_number:
+            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
+        if source_run.quality != "pass":
+            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
+        return PairedCommentDiagnostic(self.api, self.config, registration).run(
+            source_run,
+            source_pull,
+        )
+
     def reconcile_all(
         self,
         preferred_run_id: int | None = None,
@@ -2102,6 +2621,11 @@ def _cli() -> int:
         default=os.environ.get("POST_MERGE_SIMULATION_CASE") or None,
         help="執行固定的 W11-010 Issues API simulation namespace；不得進行 production reconciliation。",
     )
+    parser.add_argument(
+        "--diagnostic-aware",
+        action="store_true",
+        help="只在 trusted workflow_run 與 controller registration 精確匹配時執行 paired comment diagnostic；否則維持既有 reconciliation。",
+    )
     parser.add_argument("--finalizer-run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--finalizer-run-url", default=os.environ.get("GITHUB_SERVER_URL", "") + "/" + os.environ.get("GITHUB_REPOSITORY", "") + "/actions/runs/" + os.environ.get("GITHUB_RUN_ID", ""))
     args = parser.parse_args()
@@ -2135,7 +2659,18 @@ def _cli() -> int:
                 finalizer_run_url=args.finalizer_run_url or None,
             ),
         )
-        results = publisher.reconcile_all(run_id, run_attempt)
+        if args.diagnostic_aware:
+            result = publisher.reconcile_diagnostic_or_normal(
+                run_id,
+                run_attempt,
+                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+            )
+            if isinstance(result, PairedCommentDiagnosticResult):
+                print(json.dumps(result.as_dict(), sort_keys=True))
+                return 0
+            results = result
+        else:
+            results = publisher.reconcile_all(run_id, run_attempt)
         if len(results) == 1:
             print(json.dumps(results[0].as_dict(), sort_keys=True))
         else:
