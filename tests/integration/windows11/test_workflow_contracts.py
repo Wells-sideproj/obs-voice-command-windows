@@ -47,12 +47,13 @@ def test_finalizer_has_only_the_arbitrated_mutation_permissions() -> None:
     assert "contents: read" in job
     assert "actions: read" in job
     assert "checks: read" in job
-    assert "pull-requests: read" in job
+    assert "pull-requests: write" in job
     assert "issues: write" in job
     assert "contents: write" not in job
     assert "actions: write" not in job
     assert "checks: write" not in job
-    assert "pull-requests: write" not in job
+    assert "pull-requests: read" not in job
+    assert job.count("pull-requests: write") == 1
     assert "ref: develop" in job
     assert "tools/post_merge_publisher.py" in job
     assert "github.event.workflow_run.head_sha" not in job

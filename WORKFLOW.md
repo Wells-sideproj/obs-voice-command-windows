@@ -124,7 +124,7 @@ active merge-queue contract.
 ### W11-010 post-merge producer/finalizer 契約
 
 - `post-merge.yml` 是可信任的 `push`-to-`develop` producer。它的 job graph 與相關 environment 必須從 `ci.yml` 複製，只有 `contents: read`，不得寫入 issues、checks、Actions state 或 pull requests。
-- `post-merge-finalize.yml` 是獨立 workflow，只接收指定 producer 在 `develop` 完成的 run，並提供只有 `github.ref == refs/heads/develop` 才能執行的 trusted manual reconciliation；它不是 pull-request 或 merge-group publisher。它的 top-level permissions 為空，唯一 job 精確取得 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read`、`issues: write`，並以 `cancel-in-progress: false` 序列化。
+- `post-merge-finalize.yml` 是獨立 workflow，只接收指定 producer 在 `develop` 完成的 run，並提供只有 `github.ref == refs/heads/develop` 才能執行的 trusted manual reconciliation；它不是 pull-request 或 merge-group publisher。它的 top-level permissions 為空，唯一 job 的正常 production contract 精確取得 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read`、`issues: write`，並以 `cancel-in-progress: false` 序列化；另有 controller-registered、固定 run identity 的一次性 W11-010 continuation 例外，僅把同一 job 的 `pull-requests` 提升為 `write` 以對已關閉 PR #13 發一則 non-production comment，絕不寫 Issue #17 或 production state。
 - Finalizer 重新抓取並驗證 repository identity、producer workflow ID/path、`push` event、`develop` branch、completed status、source SHA、current run attempt、該 SHA 對應的 GitHub Actions check-suite identity、分頁取得的全部 required jobs，以及唯一 base 為 `develop` 且 `merge_commit_sha` 等於 source SHA 的 merged PR。Producer event 的 source SHA 是權威值，不採用 finalizer 自己的 SHA。
 - Controller-owned registration 必須在 queue enrollment 前，經 protected `develop` 提交。每張 ticket 可使用以下窄幅 schema：
 
