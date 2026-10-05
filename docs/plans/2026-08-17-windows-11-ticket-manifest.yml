@@ -400,6 +400,9 @@ required_check: required / gate
 paired_comment_diagnostic_registration:
   version: 1
   pr_number: 18
+pr_comment_authorization_continuation_registration:
+  version: 1
+  pr_number: 19
 orchestrator_rules:
   stop_after_ticket_done: null
   execution_state: running
