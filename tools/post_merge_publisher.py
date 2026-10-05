@@ -54,6 +54,26 @@ PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE = "w11-010-paired-comment-diagnostic"
 PAIRED_COMMENT_DIAGNOSTIC_VERSION = 1
 PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER = 17
 PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER = 13
+PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION = (
+    "pr_comment_authorization_continuation_registration"
+)
+PR_COMMENT_AUTHORIZATION_CONTINUATION_MARKER = (
+    "<!-- w11-010-pr-comment-authorization-continuation:v1 -->"
+)
+PR_COMMENT_AUTHORIZATION_CONTINUATION_NAMESPACE = (
+    "w11-010-pr-comment-authorization-continuation"
+)
+PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION = 1
+FINALIZER_WORKFLOW_ID = 373741433
+FINALIZER_WORKFLOW_PATH = ".github/workflows/post-merge-finalize.yml"
+FINALIZER_RUN_NUMBER = 5
+FINALIZER_RUN_ATTEMPT = 1
+FINALIZER_JOB = "finalize"
+OLD_PAIRED_MARKER_COMMENT_ID = 5982279822
+OLD_PAIRED_SOURCE_PR_NUMBER = 18
+OLD_PAIRED_SOURCE_RUN_ID = 37218300780
+OLD_PAIRED_SOURCE_RUN_ATTEMPT = 1
+OLD_PAIRED_SOURCE_SHA = "1c529a492ef65ef075ec1799228d30e843b75609"
 VALID_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 NULL = {"null", "~"}
 MAX_API_ERROR_DETAIL_LENGTH = 1024
@@ -739,6 +759,14 @@ class PairedCommentDiagnosticRegistration:
     pr_number: int
 
 
+@dataclass(frozen=True)
+class PrCommentAuthorizationContinuationRegistration:
+    """Controller-owned opt-in for the fixed one-shot PR-only continuation."""
+
+    version: int
+    pr_number: int
+
+
 def parse_registration(manifest: str, ticket_id: str) -> Registration:
     """Parse only the deliberately narrow registration block, fail closed."""
 
@@ -858,6 +886,53 @@ def parse_paired_comment_diagnostic_registration(
     )
 
 
+def parse_pr_comment_authorization_continuation_registration(
+    manifest: str,
+) -> PrCommentAuthorizationContinuationRegistration | None:
+    """Parse the optional, exact-PR controller continuation registration.
+
+    The registration is intentionally independent from the v1 paired probe.
+    Its absence is the safe default.  A malformed present block fails closed
+    instead of falling back to either diagnostic or production publication.
+    """
+
+    lines = manifest.splitlines()
+    key = f"{PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION}:"
+    matches = [index for index, line in enumerate(lines) if line == key]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PublisherError(
+            "manifest must contain exactly one PR comment authorization continuation registration"
+        )
+    index = matches[0] + 1
+    child: list[str] = []
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith("  "):
+            break
+        if line.strip():
+            child.append(line)
+        index += 1
+    if len(child) != 2:
+        raise PublisherError(
+            "PR comment authorization continuation registration has an unexpected schema"
+        )
+    version_match = re.fullmatch(r"  version:\s*(\S+)\s*", child[0])
+    pr_match = re.fullmatch(r"  pr_number:\s*(\S+)\s*", child[1])
+    if (
+        not version_match
+        or version_match.group(1) != str(PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION)
+    ):
+        raise PublisherError("PR comment authorization continuation version is invalid")
+    if not pr_match or not pr_match.group(1).isdigit() or int(pr_match.group(1)) <= 0:
+        raise PublisherError("PR comment authorization continuation pr_number is invalid")
+    return PrCommentAuthorizationContinuationRegistration(
+        version=PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION,
+        pr_number=int(pr_match.group(1)),
+    )
+
+
 def registered_registrations(manifest: str) -> dict[str, Registration]:
     """Return every active ticket with a post-merge registration block."""
 
@@ -946,6 +1021,9 @@ class PublisherConfig:
     publisher_logins: tuple[str, ...] = ("github-actions[bot]",)
     finalizer_run_id: int | None = None
     finalizer_run_url: str | None = None
+    finalizer_run_number: int | None = None
+    finalizer_run_attempt: int | None = None
+    finalizer_job: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1103,47 @@ class PairedCommentDiagnosticResult:
             "read_back": True,
             "production_projection_mutated": False,
             "production_retry_state_mutated": False,
+        }
+
+
+@dataclass(frozen=True)
+class FinalizerIdentity:
+    run_id: int
+    run_number: int
+    run_attempt: int
+    job: str
+    workflow_id: int
+    workflow_path: str
+    url: str
+
+
+@dataclass(frozen=True)
+class PrCommentAuthorizationContinuationResult:
+    source_run_id: int
+    source_run_attempt: int
+    source_sha: str
+    source_pr_number: int
+    finalizer_run_id: int
+    finalizer_run_number: int
+    finalizer_run_attempt: int
+    created: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": "pr_comment_authorization_continuation",
+            "namespace": PR_COMMENT_AUTHORIZATION_CONTINUATION_NAMESPACE,
+            "source_run_id": self.source_run_id,
+            "source_run_attempt": self.source_run_attempt,
+            "source_sha": self.source_sha,
+            "source_pr_number": self.source_pr_number,
+            "finalizer_run_id": self.finalizer_run_id,
+            "finalizer_run_number": self.finalizer_run_number,
+            "finalizer_run_attempt": self.finalizer_run_attempt,
+            "created_targets": ["pull_request#13"] if self.created else [],
+            "read_back": True,
+            "production_projection_mutated": False,
+            "production_retry_state_mutated": False,
+            "issue_17_mutated": False,
         }
 
 
@@ -1378,6 +1497,330 @@ class PairedCommentDiagnostic:
         )
 
 
+class PrCommentAuthorizationContinuation:
+    """Fixed one-shot, PR13-only continuation for the approved repair probe.
+
+    This path is intentionally separate from the v1 paired probe. It reads
+    the historical Issue #17 marker as a fence, but never mutates Issue #17.
+    The finalizer identity is fixed by code and verified from the current run;
+    no workflow-run list is consulted or elected from.
+    """
+
+    def __init__(
+        self,
+        api: GithubApi,
+        config: PublisherConfig,
+        registration: PrCommentAuthorizationContinuationRegistration,
+        finalizer: FinalizerIdentity,
+    ) -> None:
+        self.api = api
+        self.config = config
+        self.registration = registration
+        self.finalizer = finalizer
+
+    def _trusted_author(self, value: Mapping[str, Any]) -> bool:
+        user = value.get("user")
+        return (
+            isinstance(user, dict)
+            and user.get("type") == "Bot"
+            and user.get("login") in self.config.publisher_logins
+        )
+
+    def _validate_merged_pr(
+        self,
+        number: int,
+        *,
+        require_unlocked: bool,
+        expected_sha: str | None = None,
+    ) -> Mapping[str, Any]:
+        pull = self.api.pull(number)
+        if pull.get("number") != number or pull.get("state") != "closed":
+            raise PublisherError(f"continuation target PR #{number} is not verified closed")
+        if not pull.get("merged_at"):
+            raise PublisherError(f"continuation target PR #{number} is not verified merged")
+        if require_unlocked and pull.get("locked") is not False:
+            raise PublisherError(f"continuation target PR #{number} is locked or unverifiable")
+        base = pull.get("base")
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        if (
+            not isinstance(base, dict)
+            or base.get("ref") != "develop"
+            or not isinstance(base_repo, dict)
+            or str(base_repo.get("full_name", "")).lower() != self.config.repository.lower()
+        ):
+            raise PublisherError(
+                f"continuation target PR #{number} is not a merged canonical develop PR"
+            )
+        merge_sha = _require_sha(
+            pull.get("merge_commit_sha"),
+            f"continuation target PR #{number} merge_commit_sha",
+        )
+        if expected_sha is not None and merge_sha != expected_sha.lower():
+            raise PublisherError(
+                f"continuation source PR #{number} merge SHA does not match the old evidence"
+            )
+        expected_url = f"https://github.com/{self.config.repository}/pull/{number}"
+        if pull.get("html_url") != expected_url:
+            raise PublisherError(f"continuation target PR #{number} URL is not canonical")
+        return pull
+
+    def _validate_pr13_target(self) -> None:
+        self._validate_merged_pr(
+            PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER,
+            require_unlocked=True,
+        )
+
+    def _old_payload(self) -> dict[str, Any]:
+        return {
+            "kind": "w11-010-paired-comment-diagnostic",
+            "version": PAIRED_COMMENT_DIAGNOSTIC_VERSION,
+            "namespace": PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE,
+            "repository": CANONICAL_REPOSITORY,
+            "production_projection": False,
+            "source_pr_number": OLD_PAIRED_SOURCE_PR_NUMBER,
+            "source_sha": OLD_PAIRED_SOURCE_SHA,
+            "source_run_id": OLD_PAIRED_SOURCE_RUN_ID,
+            "source_run_attempt": OLD_PAIRED_SOURCE_RUN_ATTEMPT,
+            "target_kind": "issue",
+            "target_number": PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER,
+        }
+
+    def _verify_old_issue_marker(self) -> None:
+        self._validate_merged_pr(
+            OLD_PAIRED_SOURCE_PR_NUMBER,
+            require_unlocked=False,
+            expected_sha=OLD_PAIRED_SOURCE_SHA,
+        )
+        issue = self.api.issue(PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER)
+        expected_url = (
+            f"https://github.com/{self.config.repository}/issues/"
+            f"{PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER}"
+        )
+        if (
+            issue.get("number") != PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER
+            or issue.get("state") != "closed"
+            or "pull_request" in issue
+            or issue.get("html_url") != expected_url
+        ):
+            raise PublisherError("old Issue #17 diagnostic fence is not verified closed")
+        matches: list[Mapping[str, Any]] = []
+        for comment in self.api.issue_comments(PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER):
+            body = comment.get("body")
+            if (
+                isinstance(body, str)
+                and PAIRED_COMMENT_DIAGNOSTIC_MARKER in body
+            ):
+                matches.append(comment)
+        if len(matches) != 1:
+            raise PublisherError(
+                "old Issue #17 diagnostic fence must contain exactly one v1 marker"
+            )
+        comment = matches[0]
+        if (
+            _positive_int(comment.get("id"), "old Issue #17 marker comment id")
+            != OLD_PAIRED_MARKER_COMMENT_ID
+        ):
+            raise PublisherError("old Issue #17 marker comment id does not match the approved fence")
+        if not self._trusted_author(comment):
+            raise PublisherError("old Issue #17 marker belongs to an untrusted author")
+        payload = _parse_machine_payload(
+            comment.get("body"),
+            PAIRED_COMMENT_DIAGNOSTIC_MARKER,
+        )
+        if payload != self._old_payload():
+            raise PublisherError("old Issue #17 marker payload does not match the approved source")
+
+    def _payload(
+        self,
+        *,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> dict[str, Any]:
+        return {
+            "kind": "w11-010-pr-comment-authorization-continuation",
+            "version": PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION,
+            "namespace": PR_COMMENT_AUTHORIZATION_CONTINUATION_NAMESPACE,
+            "repository": CANONICAL_REPOSITORY,
+            "production_projection": False,
+            "old_marker_comment_id": OLD_PAIRED_MARKER_COMMENT_ID,
+            "old_source_pr_number": OLD_PAIRED_SOURCE_PR_NUMBER,
+            "old_source_sha": OLD_PAIRED_SOURCE_SHA,
+            "old_source_run_id": OLD_PAIRED_SOURCE_RUN_ID,
+            "old_source_run_attempt": OLD_PAIRED_SOURCE_RUN_ATTEMPT,
+            "old_target_kind": "issue",
+            "old_target_number": PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER,
+            "continuation_pr_number": self.registration.pr_number,
+            "source_pr_number": source_pull.number,
+            "source_sha": source_run.sha,
+            "source_run_id": source_run.run_id,
+            "source_run_attempt": source_run.run_attempt,
+            "source_workflow_id": source_run.workflow_id,
+            "source_workflow_path": source_run.workflow_path,
+            "finalizer_workflow_id": self.finalizer.workflow_id,
+            "finalizer_workflow_path": self.finalizer.workflow_path,
+            "finalizer_run_id": self.finalizer.run_id,
+            "finalizer_run_number": self.finalizer.run_number,
+            "finalizer_run_attempt": self.finalizer.run_attempt,
+            "finalizer_job": self.finalizer.job,
+            "target_kind": "pull_request",
+            "target_number": PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER,
+        }
+
+    def _body(
+        self,
+        *,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> str:
+        payload = self._payload(source_run=source_run, source_pull=source_pull)
+        return "\n".join(
+            [
+                PR_COMMENT_AUTHORIZATION_CONTINUATION_MARKER,
+                "```json",
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                "```",
+                "",
+                "Bounded one-shot W11-010 non-production PR comment authorization diagnostic.",
+                "This comment is not a completion marker and does not change ticket or retry state.",
+            ]
+        )
+
+    def _validate_comment(
+        self,
+        comment: Mapping[str, Any],
+        *,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> None:
+        _positive_int(comment.get("id"), "continuation marker comment id")
+        if not self._trusted_author(comment):
+            raise PublisherError("continuation marker belongs to an untrusted author")
+        payload = _parse_machine_payload(
+            comment.get("body"),
+            PR_COMMENT_AUTHORIZATION_CONTINUATION_MARKER,
+        )
+        if payload is None:
+            raise PublisherError("continuation marker is missing its payload")
+        expected = self._payload(source_run=source_run, source_pull=source_pull)
+        if payload != expected:
+            raise PublisherError(
+                "continuation marker payload does not match the exact source and finalizer"
+            )
+
+    def _find_comment(
+        self,
+        *,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> Mapping[str, Any] | None:
+        matches: list[Mapping[str, Any]] = []
+        for comment in self.api.issue_comments(PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER):
+            body = comment.get("body")
+            if (
+                isinstance(body, str)
+                and PR_COMMENT_AUTHORIZATION_CONTINUATION_MARKER in body
+            ):
+                matches.append(comment)
+        if len(matches) > 1:
+            raise PublisherError(
+                "multiple continuation markers exist on pull_request#13"
+            )
+        if not matches:
+            return None
+        self._validate_comment(
+            matches[0],
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        return matches[0]
+
+    def _write_failure(
+        self,
+        write_error: PublisherError,
+        readback_error: PublisherError | None = None,
+    ) -> PublisherError:
+        detail = _safe_api_error_detail(write_error)
+        if readback_error is not None:
+            detail = f"{detail}; readback={_safe_api_error_detail(readback_error)}"
+        category = (
+            readback_error.category if readback_error is not None else write_error.category
+        )
+        return PublisherError(
+            "PR-only continuation comment write target=pull_request#13 "
+            f"was not confirmed by read-back; {detail}",
+            category=category,
+        )
+
+    def _ensure_comment(
+        self,
+        *,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> bool:
+        if self._find_comment(source_run=source_run, source_pull=source_pull) is not None:
+            return False
+        body = self._body(source_run=source_run, source_pull=source_pull)
+        try:
+            self.api.create_comment(PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER, body)
+        except PublisherError as exc:
+            try:
+                confirmed = self._find_comment(
+                    source_run=source_run,
+                    source_pull=source_pull,
+                )
+            except PublisherError as readback_exc:
+                raise self._write_failure(exc, readback_exc) from None
+            if confirmed is not None:
+                return True
+            raise self._write_failure(exc) from None
+        confirmed = self._find_comment(
+            source_run=source_run,
+            source_pull=source_pull,
+        )
+        if confirmed is None:
+            raise PublisherError(
+                "PR-only continuation comment write target=pull_request#13 "
+                "was not found in read-back"
+            )
+        return True
+
+    def run(
+        self,
+        source_run: VerifiedRun,
+        source_pull: VerifiedPull,
+    ) -> PrCommentAuthorizationContinuationResult:
+        if self.config.repository.lower() != CANONICAL_REPOSITORY.lower():
+            raise PublisherError(
+                "PR comment authorization continuation requires the canonical repository"
+            )
+        if source_run.quality != "pass":
+            raise PublisherError(
+                "PR comment authorization continuation requires a passing producer run"
+            )
+        if source_pull.number != self.registration.pr_number:
+            raise PublisherError(
+                "current source PR does not match the continuation registration"
+            )
+        self._validate_pr13_target()
+        with PostMergePublisher._mutation_lock:
+            self._verify_old_issue_marker()
+            created = self._ensure_comment(
+                source_run=source_run,
+                source_pull=source_pull,
+            )
+            self._validate_pr13_target()
+        return PrCommentAuthorizationContinuationResult(
+            source_run_id=source_run.run_id,
+            source_run_attempt=source_run.run_attempt,
+            source_sha=source_run.sha,
+            source_pr_number=source_pull.number,
+            finalizer_run_id=self.finalizer.run_id,
+            finalizer_run_number=self.finalizer.run_number,
+            finalizer_run_attempt=self.finalizer.run_attempt,
+            created=created,
+        )
+
+
 class PostMergePublisher:
     # The workflow also serializes finalizer jobs across processes.  This
     # process-local lock lets fake-transport tests exercise the same
@@ -1408,6 +1851,69 @@ class PostMergePublisher:
             raise PublisherError("workflow API path does not match post-merge producer")
         self._workflow_id = _positive_int(workflow.get("id"), "workflow id")
         return self._workflow_id
+
+    def _verify_fixed_finalizer_identity(self) -> FinalizerIdentity:
+        if self.config.repository.lower() != CANONICAL_REPOSITORY.lower():
+            raise PublisherError("continuation requires the canonical repository")
+        run_id = self.config.finalizer_run_id
+        if run_id is None:
+            raise PublisherError("continuation requires GITHUB_RUN_ID")
+        if self.config.finalizer_run_number != FINALIZER_RUN_NUMBER:
+            raise PublisherError(
+                "continuation requires the fixed finalizer GITHUB_RUN_NUMBER=5"
+            )
+        if self.config.finalizer_run_attempt != FINALIZER_RUN_ATTEMPT:
+            raise PublisherError(
+                "continuation requires the fixed finalizer GITHUB_RUN_ATTEMPT=1"
+            )
+        if self.config.finalizer_job != FINALIZER_JOB:
+            raise PublisherError("continuation requires the finalize job")
+        workflow = self.api.workflow(FINALIZER_WORKFLOW_PATH.rsplit("/", 1)[-1])
+        if (
+            _positive_int(workflow.get("id"), "finalizer workflow id")
+            != FINALIZER_WORKFLOW_ID
+            or workflow.get("path") != FINALIZER_WORKFLOW_PATH
+        ):
+            raise PublisherError("finalizer workflow identity is not the fixed trusted workflow")
+        run = self.api.run(run_id, FINALIZER_RUN_ATTEMPT)
+        if _positive_int(run.get("id"), "finalizer run id") != run_id:
+            raise PublisherError("finalizer run identity changed during verification")
+        if _positive_int(run.get("workflow_id"), "finalizer workflow id") != FINALIZER_WORKFLOW_ID:
+            raise PublisherError("finalizer run belongs to a different workflow")
+        if _positive_int(run.get("run_number"), "finalizer run number") != FINALIZER_RUN_NUMBER:
+            raise PublisherError("finalizer run number is not the fixed one-shot number")
+        if _positive_int(run.get("run_attempt"), "finalizer run attempt") != FINALIZER_RUN_ATTEMPT:
+            raise PublisherError("finalizer run attempt is not the fixed one-shot attempt")
+        if run.get("event") != "workflow_run" or run.get("head_branch") != "develop":
+            raise PublisherError("finalizer run is not the trusted workflow_run for develop")
+        repository = run.get("repository")
+        if (
+            not isinstance(repository, dict)
+            or str(repository.get("full_name", "")).lower()
+            != self.config.repository.lower()
+        ):
+            raise PublisherError("finalizer run repository is not the trusted repository")
+        if run.get("status") in {"cancelled", "canceled"} or run.get("conclusion") in {
+            "cancelled",
+            "canceled",
+        }:
+            raise PublisherError("fixed finalizer run is cancelled")
+        if run.get("status") not in {"queued", "in_progress", "completed"}:
+            raise PublisherError("fixed finalizer run has an unverifiable status")
+        if run.get("status") == "completed" and run.get("conclusion") != "success":
+            raise PublisherError("fixed finalizer run did not complete successfully")
+        run_path = run.get("path")
+        if run_path is not None and run_path != FINALIZER_WORKFLOW_PATH:
+            raise PublisherError("finalizer run path is not the fixed trusted workflow")
+        return FinalizerIdentity(
+            run_id=run_id,
+            run_number=FINALIZER_RUN_NUMBER,
+            run_attempt=FINALIZER_RUN_ATTEMPT,
+            job=FINALIZER_JOB,
+            workflow_id=FINALIZER_WORKFLOW_ID,
+            workflow_path=FINALIZER_WORKFLOW_PATH,
+            url=_require_url(run.get("html_url"), "finalizer run URL"),
+        )
 
     def _verify_run(self, run_id: int, expected_attempt: int | None = None) -> VerifiedRun:
         workflow_id = self._trusted_workflow_id()
@@ -2287,20 +2793,57 @@ class PostMergePublisher:
         preferred_run_attempt: int | None,
         *,
         event_name: str,
-    ) -> PairedCommentDiagnosticResult | list[PublisherResult]:
+    ) -> (
+        PairedCommentDiagnosticResult
+        | PrCommentAuthorizationContinuationResult
+        | list[PublisherResult]
+    ):
         """Run the gated paired probe or preserve normal reconciliation.
 
-        The diagnostic branch is reachable only from a ``workflow_run``
-        delivery, a controller-supplied registration whose PR is the exact
-        merged PR for this trusted producer run, and a producer/check-suite
-        result whose verified quality is ``pass``.  Every other context uses
-        the existing reducer, including normal failure handling.
+        The continuation branch is a controller-authorized, one-shot exception
+        reachable only from a ``workflow_run`` delivery.  It requires the
+        fixed finalizer identity, a controller-supplied registration whose PR
+        is the exact merged PR for this trusted producer run, a passing
+        producer/check-suite result, and ``protected_tip == source_run.sha``.
+        Any mismatch raises before mutation; while that registration remains
+        visible, later ``workflow_run`` deliveries continue to fail closed
+        until separately authorized cleanup removes the registration.  A
+        non-continuation context uses the existing reducer, including normal
+        failure handling.
         """
 
         if event_name != "workflow_run" or preferred_run_id is None:
             return self.reconcile_all(preferred_run_id, preferred_run_attempt)
-        protected_tip = self.api.branch_tip("develop")
+        protected_tip = _require_sha(
+            self.api.branch_tip("develop"),
+            "protected develop tip",
+        )
         protected_manifest = self.api.manifest(self.config.manifest_path, protected_tip)
+        continuation = parse_pr_comment_authorization_continuation_registration(
+            protected_manifest
+        )
+        if continuation is not None:
+            finalizer = self._verify_fixed_finalizer_identity()
+            source_run = self._verify_run(preferred_run_id, preferred_run_attempt)
+            if protected_tip != source_run.sha:
+                raise PublisherError(
+                    "protected develop tip does not match continuation source SHA"
+                )
+            if source_run.quality != "pass":
+                raise PublisherError(
+                    "PR comment authorization continuation requires a passing producer run"
+                )
+            source_pull = self._verified_pull_for_sha(source_run.sha)
+            if source_pull.number != continuation.pr_number:
+                raise PublisherError(
+                    "current source PR does not match the continuation registration"
+                )
+            return PrCommentAuthorizationContinuation(
+                self.api,
+                self.config,
+                continuation,
+                finalizer,
+            ).run(source_run, source_pull)
         registration = parse_paired_comment_diagnostic_registration(protected_manifest)
         if registration is None:
             return self.reconcile_all(preferred_run_id, preferred_run_attempt)
@@ -2633,6 +3176,15 @@ def _cli() -> int:
         if not args.repo:
             raise PublisherError("GITHUB_REPOSITORY is required")
         finalizer_id = _parse_int(args.finalizer_run_id, "GITHUB_RUN_ID")
+        finalizer_number = _parse_int(
+            os.environ.get("GITHUB_RUN_NUMBER"),
+            "GITHUB_RUN_NUMBER",
+        )
+        finalizer_attempt = _parse_int(
+            os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "GITHUB_RUN_ATTEMPT",
+        )
+        finalizer_job = os.environ.get("GITHUB_JOB")
         simulation_case = None if args.simulation_case in {None, "", "none"} else args.simulation_case
         if simulation_case is not None:
             if os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
@@ -2645,6 +3197,9 @@ def _cli() -> int:
                     repository=args.repo,
                     finalizer_run_id=finalizer_id,
                     finalizer_run_url=args.finalizer_run_url or None,
+                    finalizer_run_number=finalizer_number,
+                    finalizer_run_attempt=finalizer_attempt,
+                    finalizer_job=finalizer_job,
                 ),
             )
             print(json.dumps(simulation_publisher.reconcile(simulation_case).as_dict(), sort_keys=True))
@@ -2657,6 +3212,9 @@ def _cli() -> int:
                 repository=args.repo,
                 finalizer_run_id=finalizer_id,
                 finalizer_run_url=args.finalizer_run_url or None,
+                finalizer_run_number=finalizer_number,
+                finalizer_run_attempt=finalizer_attempt,
+                finalizer_job=finalizer_job,
             ),
         )
         if args.diagnostic_aware:
@@ -2665,7 +3223,13 @@ def _cli() -> int:
                 run_attempt,
                 event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
             )
-            if isinstance(result, PairedCommentDiagnosticResult):
+            if isinstance(
+                result,
+                (
+                    PairedCommentDiagnosticResult,
+                    PrCommentAuthorizationContinuationResult,
+                ),
+            ):
                 print(json.dumps(result.as_dict(), sort_keys=True))
                 return 0
             results = result

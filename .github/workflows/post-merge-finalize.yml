@@ -43,7 +43,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-      pull-requests: read
+      pull-requests: write
       issues: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
