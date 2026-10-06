@@ -25,14 +25,22 @@ from tools.post_merge_publisher import (
     PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER,
     PR_COMMENT_AUTHORIZATION_CONTINUATION_MARKER,
     ApiError,
+    FinalizerIdentity,
     GithubApi,
     HttpResponse,
+    PairedCommentDiagnostic,
+    PairedCommentDiagnosticRegistration,
     PairedCommentDiagnosticResult,
+    PrCommentAuthorizationContinuation,
+    PrCommentAuthorizationContinuationRegistration,
     PrCommentAuthorizationContinuationResult,
     PostMergePublisher,
     PublisherConfig,
     PublisherError,
+    VerifiedPull,
+    VerifiedRun,
     parse_paired_comment_diagnostic_registration,
+    parse_production_publication_pause,
     parse_pr_comment_authorization_continuation_registration,
 )
 
@@ -367,35 +375,121 @@ def _post_count(fake: FakeTransport, number: int) -> int:
     )
 
 
+def _protected_pause_manifest() -> str:
+    return (ROOT / "docs" / "plans" / "2026-08-17-windows-11-ticket-manifest.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def _retired_manifest(registration_name: str, *, pr_number: int = DIAGNOSTIC_PR) -> str:
+    return (
+        _protected_pause_manifest().rstrip()
+        + "\n"
+        + f"{registration_name}:\n"
+        + "  version: 1\n"
+        + f"  pr_number: {pr_number}\n"
+    )
+
+
+def _assert_zero_mutation(fake: FakeTransport) -> None:
+    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER) == 0
+    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    assert all(method == "GET" for method, _, _, _ in fake.calls)
+
+
+def _assert_pending_authorization(
+    fake: FakeTransport,
+    *,
+    event_name: str,
+    publisher: PostMergePublisher | None = None,
+    preferred_run_id: int | None = SOURCE_RUN,
+    preferred_run_attempt: int | None = 1,
+) -> None:
+    with pytest.raises(PublisherError, match="pending-authorization"):
+        (publisher or _publisher(fake)).reconcile_diagnostic_or_normal(
+            preferred_run_id,
+            preferred_run_attempt,
+            event_name=event_name,
+        )
+    _assert_zero_mutation(fake)
+
+
+def _assert_retired_registration(
+    fake: FakeTransport,
+    *,
+    publisher: PostMergePublisher | None = None,
+    event_name: str = "workflow_run",
+) -> None:
+    with pytest.raises(PublisherError, match="retired"):
+        (publisher or _publisher(fake)).reconcile_diagnostic_or_normal(
+            SOURCE_RUN,
+            1,
+            event_name=event_name,
+        )
+    _assert_zero_mutation(fake)
+
+
+def _verified_run() -> VerifiedRun:
+    return VerifiedRun(
+        run_id=SOURCE_RUN,
+        run_attempt=1,
+        sha=SHA,
+        workflow_id=WORKFLOW_ID,
+        workflow_path=".github/workflows/post-merge.yml",
+        url=f"https://github.com/{CANONICAL_REPOSITORY}/actions/runs/{SOURCE_RUN}",
+        conclusion="success",
+        quality="pass",
+        check_suite_id=CHECK_SUITE_ID,
+        provider="github-actions",
+        job_conclusions={},
+        failed_steps=(),
+    )
+
+
+def _verified_pull() -> VerifiedPull:
+    return VerifiedPull(
+        number=DIAGNOSTIC_PR,
+        merge_sha=SHA,
+        url=f"https://github.com/{CANONICAL_REPOSITORY}/pull/{DIAGNOSTIC_PR}",
+    )
+
+
+def _finalizer_identity() -> FinalizerIdentity:
+    return FinalizerIdentity(
+        run_id=FINALIZER_RUN,
+        run_number=FINALIZER_RUN_NUMBER,
+        run_attempt=FINALIZER_RUN_ATTEMPT,
+        job=FINALIZER_JOB,
+        workflow_id=FINALIZER_WORKFLOW_ID,
+        workflow_path=FINALIZER_WORKFLOW_PATH,
+        url=f"https://github.com/{CANONICAL_REPOSITORY}/actions/runs/{FINALIZER_RUN}",
+    )
+
+
 def test_registration_parser_defaults_dormant_without_registration() -> None:
     assert parse_paired_comment_diagnostic_registration("schema_version: 6\n") is None
 
 
-def test_registration_parser_rejects_placeholder_and_extra_fields() -> None:
-    with pytest.raises(PublisherError, match="pr_number is invalid"):
+def test_registration_parser_rejects_retired_registration_even_with_legacy_shape() -> None:
+    with pytest.raises(PublisherError, match="retired"):
         parse_paired_comment_diagnostic_registration(
             "paired_comment_diagnostic_registration:\n  version: 1\n  pr_number: <real PR>\n"
         )
-    with pytest.raises(PublisherError, match="unexpected schema"):
+    with pytest.raises(PublisherError, match="retired"):
         parse_paired_comment_diagnostic_registration(
             "paired_comment_diagnostic_registration:\n  version: 1\n  pr_number: 42\n  producer_run_id: 9001\n"
         )
 
 
-def test_continuation_registration_is_dormant_by_default_and_accepts_real_pr_only() -> None:
+def test_continuation_registration_is_absent_or_retired() -> None:
     assert parse_pr_comment_authorization_continuation_registration("schema_version: 6\n") is None
-    registration = parse_pr_comment_authorization_continuation_registration(
-        "pr_comment_authorization_continuation_registration:\n  version: 1\n  pr_number: 42\n"
-    )
-    assert registration is not None
-    assert registration.pr_number == 42
-    with pytest.raises(PublisherError, match="pr_number is invalid"):
+    with pytest.raises(PublisherError, match="retired"):
         parse_pr_comment_authorization_continuation_registration(
             "pr_comment_authorization_continuation_registration:\n"
             "  version: 1\n"
             "  pr_number: <controller PR>\n"
         )
-    with pytest.raises(PublisherError, match="unexpected schema"):
+    with pytest.raises(PublisherError, match="retired"):
         parse_pr_comment_authorization_continuation_registration(
             "pr_comment_authorization_continuation_registration:\n"
             "  version: 1\n"
@@ -404,154 +498,96 @@ def test_continuation_registration_is_dormant_by_default_and_accepts_real_pr_onl
         )
 
 
-def test_continuation_fixed_run_5_attempt_1_posts_pr13_once_and_never_lists_runs() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+def test_retired_diagnostic_classes_fail_before_transport() -> None:
+    fake = FakeTransport(manifest=_protected_pause_manifest())
+    api = GithubApi(fake, CANONICAL_REPOSITORY)
+    with pytest.raises(PublisherError, match="retired"):
+        PairedCommentDiagnostic(
+            api,
+            PublisherConfig(repository=CANONICAL_REPOSITORY),
+            PairedCommentDiagnosticRegistration(version=1, pr_number=DIAGNOSTIC_PR),
+        ).run(_verified_run(), _verified_pull())
+    with pytest.raises(PublisherError, match="retired"):
+        PrCommentAuthorizationContinuation(
+            api,
+            PublisherConfig(repository=CANONICAL_REPOSITORY),
+            PrCommentAuthorizationContinuationRegistration(version=1, pr_number=DIAGNOSTIC_PR),
+            _finalizer_identity(),
+        ).run(_verified_run(), _verified_pull())
+    assert fake.calls == []
+
+
+def test_real_protected_pause_manifest_is_parseable_without_active_registration() -> None:
+    manifest = _protected_pause_manifest()
+    pause = parse_production_publication_pause(manifest)
+    assert pause is not None
+    assert pause.state == "blocked"
+    assert pause.reason == "pending-authorization"
+    assert parse_paired_comment_diagnostic_registration(manifest) is None
+    assert parse_pr_comment_authorization_continuation_registration(manifest) is None
+
+
+def test_continuation_fixed_run_5_attempt_1_is_retired_without_listing_runs() -> None:
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.workflow_runs = [{"id": 1, "run_number": 4}, {"id": 2, "run_number": 3}]
 
-    result = _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert isinstance(result, PrCommentAuthorizationContinuationResult)
-    assert result.created is True
-    assert result.finalizer_run_number == 5
-    assert result.finalizer_run_attempt == 1
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 1
-    assert len(fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER]) == 1
-    assert all(
-        method == "GET"
-        for method, path, _, _ in fake.calls
-        if f"/issues/{PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER}" in path
-    )
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
     assert not any(
         "/actions/workflows/373741433/runs" in path
         for _, path, _, _ in fake.calls
     )
-    assert _payload_from_body(
-        fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER][0]["body"]
-    )["finalizer_run_number"] == 5
 
 
-def test_continuation_success_replay_reads_marker_without_reposting() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+def test_continuation_success_replay_of_old_marker_stays_retired_without_reposting() -> None:
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     publisher = _continuation_publisher(fake)
-    first = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-    before = _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER)
-
-    second = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert isinstance(first, PrCommentAuthorizationContinuationResult)
-    assert isinstance(second, PrCommentAuthorizationContinuationResult)
-    assert first.created is True
-    assert second.created is False
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == before == 1
+    _assert_retired_registration(fake, publisher=publisher)
+    _assert_retired_registration(fake, publisher=publisher)
+    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
 
 
 def test_continuation_requires_protected_tip_to_match_source_run_sha() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
-    _arm_old_issue_marker(fake)
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     fake.protected_tip = "b" * 40
 
     with pytest.raises(
         PublisherError,
-        match="protected develop tip does not match continuation source SHA",
+        match="protected develop tip does not match source run SHA",
     ):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
+        _publisher(fake).reconcile_diagnostic_or_normal(
             SOURCE_RUN,
             1,
             event_name="workflow_run",
         )
 
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
-    assert all(
-        not (
-            method != "GET"
-            and f"/issues/{PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER}" in path
-        )
-        for method, path, _, _ in fake.calls
-    )
+    _assert_zero_mutation(fake)
 
 
-def test_continuation_requires_old_issue_fence_and_does_not_post_partial_state() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
-
-    with pytest.raises(PublisherError, match="old Issue #17 diagnostic fence"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
-    assert all(
-        not (
-            method != "GET"
-            and f"/issues/{PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER}" in path
-        )
-        for method, path, _, _ in fake.calls
-    )
+def test_continuation_missing_pause_is_pending_and_does_not_post_partial_state() -> None:
+    fake = FakeTransport(manifest="schema_version: 6\n")
+    _assert_pending_authorization(fake, event_name="workflow_run")
 
 
 def test_continuation_failing_producer_has_zero_diagnostic_posts() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     fake.producer_pass = False
-    _arm_old_issue_marker(fake)
-
-    with pytest.raises(PublisherError, match="passing producer run"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    _assert_pending_authorization(fake, event_name="workflow_run")
     assert fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER] == []
 
 
-@pytest.mark.parametrize(
-    ("attribute", "value", "message"),
-    [
-        ("finalizer_run_number", 4, "GITHUB_RUN_NUMBER"),
-        ("finalizer_run_number", 6, "GITHUB_RUN_NUMBER"),
-        ("finalizer_run_attempt", 2, "GITHUB_RUN_ATTEMPT"),
-        ("finalizer_workflow_id", 999, "workflow identity"),
-        ("finalizer_job", "other", "finalize job"),
-        ("finalizer_event", "push", "workflow_run"),
-        ("finalizer_head_branch", "feature", "workflow_run"),
-        ("finalizer_repository", "attacker/other", "repository"),
-        ("finalizer_path", ".github/workflows/other.yml", "workflow identity"),
-        ("finalizer_status", "cancelled", "cancelled"),
-    ],
-)
-def test_continuation_wrong_fixed_finalizer_identity_is_fail_closed(
-    attribute: str,
-    value: Any,
-    message: str,
-) -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+def test_continuation_run_6_is_authorization_blocked_without_finalizer_lookup() -> None:
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
+    fake.finalizer_run_number = 6
     _arm_old_issue_marker(fake)
-    setattr(fake, attribute, value)
-
-    with pytest.raises(PublisherError, match=message):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
     assert not any(
         "/actions/workflows/373741433/runs" in path
         for _, path, _, _ in fake.calls
@@ -559,36 +595,28 @@ def test_continuation_wrong_fixed_finalizer_identity_is_fail_closed(
 
 
 def test_continuation_registration_wrong_current_source_pr_is_zero_post() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest(pr_number=999))
-    _arm_old_issue_marker(fake)
-
-    with pytest.raises(PublisherError, match="source PR"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
+    fake = FakeTransport(
+        manifest=_retired_manifest(
+            "pr_comment_authorization_continuation_registration", pr_number=999
         )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    )
+    _arm_old_issue_marker(fake)
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
 
 
 def test_continuation_locked_target_is_zero_post() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     fake.pr13_locked = True
     _arm_old_issue_marker(fake)
-
-    with pytest.raises(PublisherError, match="locked"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
 
 
 def test_continuation_forged_duplicate_marker_is_zero_post() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER] = [
         {
@@ -598,18 +626,13 @@ def test_continuation_forged_duplicate_marker_is_zero_post() -> None:
         }
     ]
 
-    with pytest.raises(PublisherError, match="untrusted author"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
 
 
 def test_continuation_403_preserves_sanitized_evidence_and_never_retries() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.post_errors[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER] = ApiError(
         "POST",
@@ -621,72 +644,48 @@ def test_continuation_403_preserves_sanitized_evidence_and_never_retries() -> No
         "Authorization=COMMENT_TOKEN_SENTINEL; body=COMMENT_BODY_SENTINEL",
     )
 
-    with pytest.raises(PublisherError) as raised:
+    with pytest.raises(PublisherError, match="retired") as raised:
         _continuation_publisher(fake).reconcile_diagnostic_or_normal(
             SOURCE_RUN,
             1,
             event_name="workflow_run",
         )
-
     message = str(raised.value)
-    assert "target=pull_request#13" in message
-    assert "HTTP 403" in message
-    assert "X-GitHub-Request-Id=abcd:123456:abcdef:7890ab:12345678" in message
-    assert "X-Accepted-GitHub-Permissions=issues=write, pull-requests=write" in message
     assert "COMMENT_TOKEN_SENTINEL" not in message
     assert "COMMENT_BODY_SENTINEL" not in message
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 1
-    assert fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER] == []
+    _assert_zero_mutation(fake)
 
 
 def test_continuation_missing_readback_stops_after_one_post() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.hide_pr13_readback = True
-
-    with pytest.raises(PublisherError, match="target=pull_request#13"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 1
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
 
 
 def test_continuation_uncertain_post_reads_back_once_without_reposting() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.uncertain_post_without_write.add(PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER)
-
-    with pytest.raises(PublisherError, match="HTTP 503"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 1
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
     assert fake.comments[PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER] == []
 
 
 def test_continuation_old_marker_wrong_identity_is_zero_post() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+    fake = FakeTransport(
+        manifest=_retired_manifest("pr_comment_authorization_continuation_registration")
+    )
     _arm_old_issue_marker(fake)
     fake.comments[PAIRED_COMMENT_DIAGNOSTIC_ISSUE_NUMBER][0]["id"] = OLD_PAIRED_MARKER_COMMENT_ID + 1
-
-    with pytest.raises(PublisherError, match="marker comment id"):
-        _continuation_publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    _assert_retired_registration(fake, publisher=_continuation_publisher(fake))
 
 
-def test_continuation_wrong_event_preserves_normal_path_and_zero_diagnostic_posts() -> None:
-    fake = FakeTransport(manifest=_continuation_manifest())
+def test_continuation_wrong_event_is_pending_and_zero_mutation() -> None:
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     _arm_old_issue_marker(fake)
     publisher = _continuation_publisher(fake)
     normal_calls: list[tuple[int | None, int | None]] = []
@@ -696,52 +695,23 @@ def test_continuation_wrong_event_preserves_normal_path_and_zero_diagnostic_post
         return []
 
     publisher.reconcile_all = normal  # type: ignore[method-assign]
-    result = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
+    _assert_pending_authorization(
+        fake,
+        publisher=publisher,
         event_name="workflow_dispatch",
     )
-
-    assert result == []
-    assert normal_calls == [(SOURCE_RUN, 1)]
-    assert _post_count(fake, PAIRED_COMMENT_DIAGNOSTIC_PR_NUMBER) == 0
+    assert normal_calls == []
 
 
-def test_active_registration_writes_one_comment_per_closed_target_only() -> None:
-    fake = FakeTransport()
-
-    result = _publisher(fake).reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert isinstance(result, PairedCommentDiagnosticResult)
-    assert set(result.created_targets) == {"issue#17", "pull_request#13"}
-    assert len(fake.comments[17]) == 1
-    assert len(fake.comments[13]) == 1
-    assert all(
-        PAIRED_COMMENT_DIAGNOSTIC_MARKER in comment["body"]
-        for comments in fake.comments.values()
-        for comment in comments
-    )
-    assert all(
-        payload["production_projection"] is False
-        for comments in fake.comments.values()
-        for comment in comments
-        for payload in [_payload_from_body(comment["body"])]
-    )
-    assert all(
-        not (method == "POST" and path.endswith("/issues"))
-        and not method in {"PATCH", "PUT"}
-        for method, path, _, _ in fake.calls
-    )
-    assert _post_count(fake, 17) == 1
-    assert _post_count(fake, 13) == 1
+def test_active_registration_is_retired_without_comment_mutation() -> None:
+    fake = FakeTransport(manifest=_retired_manifest("paired_comment_diagnostic_registration"))
+    _assert_retired_registration(fake)
+    assert fake.comments[17] == []
+    assert fake.comments[13] == []
 
 
-def test_matching_registration_with_failing_producer_keeps_normal_path() -> None:
-    fake = FakeTransport()
+def test_matching_registration_with_failing_producer_remains_blocked() -> None:
+    fake = FakeTransport(manifest=_retired_manifest("paired_comment_diagnostic_registration"))
     fake.producer_pass = False
     publisher = _publisher(fake)
     normal_calls: list[tuple[int | None, int | None]] = []
@@ -751,55 +721,32 @@ def test_matching_registration_with_failing_producer_keeps_normal_path() -> None
         return []
 
     publisher.reconcile_all = normal  # type: ignore[method-assign]
-    result = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert result == []
-    assert normal_calls == [(SOURCE_RUN, 1)]
-    assert _post_count(fake, 17) == 0
-    assert _post_count(fake, 13) == 0
+    _assert_retired_registration(fake, publisher=publisher)
+    assert normal_calls == []
     assert fake.comments[17] == []
     assert fake.comments[13] == []
 
 
-def test_rerun_reads_existing_pair_without_reposting() -> None:
-    fake = FakeTransport()
+def test_rerun_of_old_marker_stays_pending_without_reposting() -> None:
+    fake = FakeTransport(manifest=_protected_pause_manifest())
+    _arm_old_issue_marker(fake)
     publisher = _publisher(fake)
-    publisher.reconcile_diagnostic_or_normal(SOURCE_RUN, 1, event_name="workflow_run")
-    before = (_post_count(fake, 17), _post_count(fake, 13))
-
-    result = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert isinstance(result, PairedCommentDiagnosticResult)
-    assert result.created_targets == ()
-    assert (_post_count(fake, 17), _post_count(fake, 13)) == before == (1, 1)
+    _assert_pending_authorization(fake, publisher=publisher, event_name="workflow_run")
+    _assert_pending_authorization(fake, publisher=publisher, event_name="workflow_run")
+    assert fake.comments[17]
+    assert fake.comments[13] == []
 
 
-def test_uncertain_post_is_read_back_without_a_retry() -> None:
-    fake = FakeTransport()
+def test_uncertain_post_is_not_attempted_after_retirement() -> None:
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     fake.uncertain_post_with_write.add(17)
-
-    result = _publisher(fake).reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
-        event_name="workflow_run",
-    )
-
-    assert isinstance(result, PairedCommentDiagnosticResult)
-    assert _post_count(fake, 17) == 1
-    assert len(fake.comments[17]) == 1
-    assert _post_count(fake, 13) == 1
+    _assert_pending_authorization(fake, event_name="workflow_run")
+    assert fake.comments[17] == []
+    assert fake.comments[13] == []
 
 
 def test_partial_pair_fences_rerun_after_pr_forbidden_without_reposting() -> None:
-    fake = FakeTransport()
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     fake.post_errors[13] = ApiError(
         "POST",
         f"{REPOSITORY_PATH}/issues/13/comments",
@@ -811,67 +758,36 @@ def test_partial_pair_fences_rerun_after_pr_forbidden_without_reposting() -> Non
     )
     publisher = _publisher(fake)
 
-    with pytest.raises(PublisherError) as first:
+    with pytest.raises(PublisherError, match="pending-authorization") as first:
         publisher.reconcile_diagnostic_or_normal(
             SOURCE_RUN,
             1,
             event_name="workflow_run",
         )
-
     first_message = str(first.value)
-    assert "target=pull_request#13" in first_message
-    assert "HTTP 403" in first_message
-    assert "X-GitHub-Request-Id=abcd:123456:abcdef:7890ab:12345678" in first_message
-    assert "X-Accepted-GitHub-Permissions=issues=write, contents=read" in first_message
     assert "COMMENT_TOKEN_SENTINEL" not in first_message
     assert "COMMENT_BODY_SENTINEL" not in first_message
-    assert _post_count(fake, 17) == 1
-    assert _post_count(fake, 13) == 1
+    _assert_zero_mutation(fake)
 
-    with pytest.raises(PublisherError, match="refusing all further POSTs"):
+    with pytest.raises(PublisherError, match="pending-authorization"):
         publisher.reconcile_diagnostic_or_normal(
             SOURCE_RUN,
             1,
             event_name="workflow_run",
         )
-
-    assert _post_count(fake, 17) == 1
-    assert _post_count(fake, 13) == 1
-    assert len(fake.comments[17]) == 1
-    assert fake.comments[13] == []
-
-    # A producer rerun changes the run attempt but must still see Issue #17 as
-    # the persistent fence; it cannot try the missing PR target again.
-    fake.source_run_attempt = 2
-    with pytest.raises(PublisherError, match="refusing all further POSTs"):
-        publisher.reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            2,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, 17) == 1
-    assert _post_count(fake, 13) == 1
+    _assert_zero_mutation(fake)
 
 
 def test_uncertain_post_without_readback_stops_without_posting_second_target() -> None:
-    fake = FakeTransport()
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     fake.uncertain_post_without_write.add(17)
-
-    with pytest.raises(PublisherError, match="not confirmed by read-back"):
-        _publisher(fake).reconcile_diagnostic_or_normal(
-            SOURCE_RUN,
-            1,
-            event_name="workflow_run",
-        )
-
-    assert _post_count(fake, 17) == 1
-    assert _post_count(fake, 13) == 0
+    _assert_pending_authorization(fake, event_name="workflow_run")
     assert fake.comments[17] == []
+    assert fake.comments[13] == []
 
 
-def test_diagnostic_is_not_active_for_manual_context() -> None:
-    fake = FakeTransport()
+def test_diagnostic_manual_context_is_pending_without_normal_fallback() -> None:
+    fake = FakeTransport(manifest=_protected_pause_manifest())
     publisher = _publisher(fake)
     called: list[tuple[int | None, int | None]] = []
 
@@ -880,19 +796,17 @@ def test_diagnostic_is_not_active_for_manual_context() -> None:
         return []
 
     publisher.reconcile_all = normal  # type: ignore[method-assign]
-    result = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
+    _assert_pending_authorization(
+        fake,
+        publisher=publisher,
         event_name="workflow_dispatch",
     )
-
-    assert result == []
-    assert called == [(SOURCE_RUN, 1)]
+    assert called == []
     assert fake.comments[17] == []
     assert fake.comments[13] == []
 
 
-def test_dormant_registration_preserves_normal_reconciliation() -> None:
+def test_missing_pause_fails_closed_without_normal_reconciliation() -> None:
     fake = FakeTransport(manifest="schema_version: 6\n")
     publisher = _publisher(fake)
     called: list[tuple[int | None, int | None]] = []
@@ -902,19 +816,17 @@ def test_dormant_registration_preserves_normal_reconciliation() -> None:
         return []
 
     publisher.reconcile_all = normal  # type: ignore[method-assign]
-    result = publisher.reconcile_diagnostic_or_normal(
-        SOURCE_RUN,
-        1,
+    _assert_pending_authorization(
+        fake,
+        publisher=publisher,
         event_name="workflow_run",
     )
-
-    assert result == []
-    assert called == [(SOURCE_RUN, 1)]
+    assert called == []
     assert fake.comments[17] == []
     assert fake.comments[13] == []
 
 
-def test_finalizer_uses_same_job_and_limits_the_temporary_permission_exception() -> None:
+def test_finalizer_uses_read_only_pull_request_permission_after_cleanup() -> None:
     workflow = (ROOT / ".github" / "workflows" / "post-merge-finalize.yml").read_text(
         encoding="utf-8"
     )
@@ -925,15 +837,15 @@ def test_finalizer_uses_same_job_and_limits_the_temporary_permission_exception()
     assert "contents: read" in jobs
     assert "actions: read" in jobs
     assert "checks: read" in jobs
-    assert "pull-requests: write" in jobs
+    assert "pull-requests: read" in jobs
     assert "issues: write" in jobs
     assert "contents: write" not in jobs
     assert "actions: write" not in jobs
     assert "checks: write" not in jobs
-    assert "pull-requests: read" not in jobs
-    assert jobs.count("pull-requests: write") == 1
+    assert "pull-requests: write" not in jobs
+    assert jobs.count("pull-requests: read") == 1
     assert "matrix:" not in jobs
     assert jobs.count("python tools/post_merge_publisher.py --diagnostic-aware") == 1
-    assert "PAT" not in workflow
+    assert "secrets.PAT" not in workflow
     assert "GCM" not in workflow
     assert "continue-on-error" not in workflow
