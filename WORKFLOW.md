@@ -124,7 +124,7 @@ active merge-queue contract.
 ### W11-010 post-merge producer/finalizer 契約
 
 - `post-merge.yml` 是可信任的 `push`-to-`develop` producer。它的 job graph 與相關 environment 必須從 `ci.yml` 複製，只有 `contents: read`，不得寫入 issues、checks、Actions state 或 pull requests。
-- `post-merge-finalize.yml` 是獨立 workflow，只接收指定 producer 在 `develop` 完成的 run，並提供只有 `github.ref == refs/heads/develop` 才能執行的 trusted manual reconciliation；它不是 pull-request 或 merge-group publisher。它的 top-level permissions 為空，唯一 job 的正常 production contract 精確取得 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read`、`issues: write`，並以 `cancel-in-progress: false` 序列化；另有 controller-registered、固定 run identity 的一次性 W11-010 continuation 例外，僅把同一 job 的 `pull-requests` 提升為 `write` 以對已關閉 PR #13 發一則 non-production comment，絕不寫 Issue #17 或 production state。
+- `post-merge-finalize.yml` 是獨立 workflow，只接收指定 producer 在 `develop` 完成的 run，並提供只有 `github.ref == refs/heads/develop` 才能執行的 trusted manual reconciliation；它不是 pull-request 或 merge-group publisher。它的 top-level permissions 為空，唯一 job 保留 `contents: read`、`actions: read`、`checks: read`、`pull-requests: read` 與供隔離 simulation 使用的 `issues: write`，並以 `cancel-in-progress: false` 序列化；不再存在任何 `pull-requests: write` continuation 例外。
 - Finalizer 重新抓取並驗證 repository identity、producer workflow ID/path、`push` event、`develop` branch、completed status、source SHA、current run attempt、該 SHA 對應的 GitHub Actions check-suite identity、分頁取得的全部 required jobs，以及唯一 base 為 `develop` 且 `merge_commit_sha` 等於 source SHA 的 merged PR。Producer event 的 source SHA 是權威值，不採用 finalizer 自己的 SHA。
 - Controller-owned registration 必須在 queue enrollment 前，經 protected `develop` 提交。每張 ticket 可使用以下窄幅 schema：
 
@@ -139,8 +139,10 @@ active merge-queue contract.
 
   Repair attempt 使用 immediate predecessor PR 與已存在的 repair issue number。Worker 不得自行編造 PR number、commit SHA 或 future issue ID；merged SHA、run ID、comment 與新建 issue ID 都是 runtime evidence 與 controller bookkeeping。
 - Issue body、label 與 PR comment 都是可編輯 projection。Reducer 從 verified run 與 protected registration 重建 retry state，分頁搜尋 open/closed issues，驗證 bot author 與 machine payload，去重相同 run/attempt 的 rerun，並讓較新的 failure 對 stale PASS 保持權威。每次 invocation 都 reconcile protected `develop` 可見的所有 registered lineage run，不只處理觸發它的 delivery。
+- Cleanup 後，`paired_comment_diagnostic_registration` 與 `pr_comment_authorization_continuation_registration` 僅保留為 historical evidence，任何重新出現或 malformed block 都 fail closed，絕不重新武裝 diagnostic。Protected manifest 的 production publication pause 固定為 `state=blocked`、`reason=pending-authorization`、`durable_permission=awaiting_explicit_authorization`、`diagnostic_state=consumed`，並明確停用 production `POST`、`PATCH`、`DELETE`。
+- `workflow_run` 與 `workflow_dispatch` 的正常 reconciliation 仍先以 GET-only 驗證 protected tip、producer run、check suite 與 merged PR（若 delivery 提供 producer run），然後以 `pending-authorization` 非零失敗退出。這個 failure 是授權阻塞，不是 code failure：不建立／更新 Issue #14、不改 retry state、不執行任何 production POST/PATCH/DELETE，也不把跳過 publication 偽裝成 success。Cleanup merge 觸發的可信 producer 與 finalizer run #6 因此應清楚失敗並等待明確授權。
 - Finalizer 的 `workflow_dispatch.simulation_case` 只允許 `none`、`pass`、`fail`、`rerun`；非 `none` 時固定使用 `w11-010-simulation` namespace，透過 real Issues API 建立／更新隔離 projection，不讀寫 manifest、PR comment、production ticket 或 production retry state。`rerun` 必須找到既有 simulation failure，且不得增加 retry count。
-- W11-010 acceptance 分三階段：(1) merge 前 fake-transport publisher tests；(2) protected merge 後 exact merged-SHA producer/finalizer evidence；(3) 隔離且明確標示 simulated 的 live PASS/FAIL/rerun publication 與 issue read-back。Local tests 不得取代第 (2) 或第 (3) 階段。
+- W11-010 acceptance 分三階段：(1) merge 前 fake-transport publisher tests；(2) protected merge 後 exact merged-SHA producer/finalizer evidence；(3) 隔離且明確標示 simulated 的 live PASS/FAIL/rerun publication 與 issue read-back。Local tests 不得取代第 (2) 或第 (3) 階段；本次 zero-mutation cleanup 與 pending-authorization failure 也不等於 W11-010 完成。
 
 ### Merge execution contract
 

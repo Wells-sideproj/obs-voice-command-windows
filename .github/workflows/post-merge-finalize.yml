@@ -43,7 +43,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-      pull-requests: write
+      pull-requests: read
       issues: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Reconcile 已註冊的 post-merge evidence 或 gated paired diagnostic
+      - name: Reconcile production evidence（pending-authorization、zero production POST/PATCH/DELETE）
         if: ${{ github.event_name == 'workflow_run' || inputs.simulation_case == '' || inputs.simulation_case == 'none' }}
         run: python tools/post_merge_publisher.py --diagnostic-aware
 

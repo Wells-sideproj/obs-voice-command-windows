@@ -47,17 +47,19 @@ def test_finalizer_has_only_the_arbitrated_mutation_permissions() -> None:
     assert "contents: read" in job
     assert "actions: read" in job
     assert "checks: read" in job
-    assert "pull-requests: write" in job
+    assert "pull-requests: read" in job
     assert "issues: write" in job
     assert "contents: write" not in job
     assert "actions: write" not in job
     assert "checks: write" not in job
-    assert "pull-requests: read" not in job
-    assert job.count("pull-requests: write") == 1
+    assert "pull-requests: write" not in job
+    assert job.count("pull-requests: read") == 1
     assert "ref: develop" in job
     assert "tools/post_merge_publisher.py" in job
     assert "github.event.workflow_run.head_sha" not in job
     assert "production ticket state" in workflow
+    assert "pending-authorization" in workflow
+    assert "zero production" in workflow or "production POST/PATCH/DELETE" in workflow
 
 
 def test_layer_b_workflow_is_inactive_until_manual_or_reusable_authorized_call() -> None:

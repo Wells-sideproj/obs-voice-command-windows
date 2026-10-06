@@ -49,6 +49,27 @@ REPAIR_MARKER = "<!-- w11-010-repair:v1 -->"
 SIMULATION_MARKER = "<!-- w11-010-simulation:v1 -->"
 SIMULATION_NAMESPACE = "w11-010-simulation"
 SIMULATION_CASES = ("pass", "fail", "rerun")
+PRODUCTION_PUBLICATION_PAUSE_KEY = "production_publication_pause"
+PRODUCTION_PUBLICATION_PAUSE_REASON = "pending-authorization"
+PRODUCTION_PUBLICATION_DURABLE_PERMISSION = "awaiting_explicit_authorization"
+HISTORICAL_DIAGNOSTIC_REGISTRATIONS = frozenset(
+    {
+        "paired_comment_diagnostic_registration (historical version 1)",
+        "pr_comment_authorization_continuation_registration (historical version 1)",
+    }
+)
+HISTORICAL_DIAGNOSTIC_EVIDENCE = {
+    "issue_number": "17",
+    "pr_number": "13",
+    "durable_pr_number": "19",
+    "finalizer_workflow_id": "373741433",
+    "finalizer_run_id": "37281697373",
+    "finalizer_run_number": "5",
+    "finalizer_run_attempt": "1",
+    "producer_run_id": "37281618408",
+    "producer_sha": "27c8fb321c7dc5bcc7280197d46dd7c44fdb1d7b",
+    "pr13_comment_id": "5990563780",
+}
 PAIRED_COMMENT_DIAGNOSTIC_MARKER = "<!-- w11-010-paired-comment-diagnostic:v1 -->"
 PAIRED_COMMENT_DIAGNOSTIC_NAMESPACE = "w11-010-paired-comment-diagnostic"
 PAIRED_COMMENT_DIAGNOSTIC_VERSION = 1
@@ -761,10 +782,133 @@ class PairedCommentDiagnosticRegistration:
 
 @dataclass(frozen=True)
 class PrCommentAuthorizationContinuationRegistration:
-    """Controller-owned opt-in for the fixed one-shot PR-only continuation."""
+    """Historical type retained only so old evidence can be read by tests."""
 
     version: int
     pr_number: int
+
+
+@dataclass(frozen=True)
+class ProductionPublicationPause:
+    """Protected manifest state that disables production publication."""
+
+    state: str
+    reason: str
+    durable_permission: str
+    diagnostic_state: str
+
+
+def _retired_registration_error(name: str) -> PublisherError:
+    return PublisherError(
+        f"{name} is retired; historical diagnostic evidence is not executable",
+        category="blocked",
+    )
+
+
+def _production_pause_block(manifest: str) -> list[str] | None:
+    lines = manifest.splitlines()
+    matches = [
+        index
+        for index, line in enumerate(lines)
+        if line == f"{PRODUCTION_PUBLICATION_PAUSE_KEY}:"
+    ]
+    if len(matches) > 1:
+        raise PublisherError("manifest contains duplicate production publication pause blocks")
+    if not matches:
+        return None
+    child: list[str] = []
+    index = matches[0] + 1
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith("  "):
+            break
+        if line.strip():
+            child.append(line)
+        index += 1
+    return child
+
+
+def parse_production_publication_pause(
+    manifest: str,
+) -> ProductionPublicationPause | None:
+    """Parse the durable production publication pause, failing closed.
+
+    The pause is intentionally a protected-manifest contract rather than an
+    environment flag.  Missing pause state is tolerated for reducer unit
+    fixtures, while the committed W11-010 manifest carries the complete
+    blocked contract.  A partial or malformed protected pause never falls
+    back to production publication.
+    """
+
+    child = _production_pause_block(manifest)
+    if child is None:
+        return None
+    direct: dict[str, str | None] = {}
+    nested: dict[str, list[str]] = {
+        "retired_registrations": [],
+        "historical_evidence": [],
+    }
+    current_nested: str | None = None
+    for line in child:
+        match = re.fullmatch(r"  ([A-Za-z][A-Za-z0-9_-]*):(?:\s*(\S+))?\s*", line)
+        if match:
+            key, value = match.groups()
+            if key in direct:
+                raise PublisherError(
+                    f"production publication pause contains duplicate {key}"
+                )
+            direct[key] = value
+            current_nested = key if key in nested else None
+            continue
+        if not line.startswith("    ") or current_nested is None:
+            raise PublisherError("production publication pause has an unexpected child")
+        nested[current_nested].append(line)
+    expected = {
+        "state": "blocked",
+        "reason": PRODUCTION_PUBLICATION_PAUSE_REASON,
+        "durable_permission": PRODUCTION_PUBLICATION_DURABLE_PERMISSION,
+        "diagnostic_state": "consumed",
+    }
+    required_blocks = {"retired_registrations", "historical_evidence"}
+    required_scalars = set(expected) | {
+        "production_post",
+        "production_patch",
+        "production_delete",
+    }
+    if set(direct) != required_scalars | required_blocks:
+        raise PublisherError("production publication pause has an unexpected schema")
+    if any(direct[key] is not None for key in required_blocks):
+        raise PublisherError("production publication pause block schema is invalid")
+    if any(direct[key] != value for key, value in expected.items()):
+        raise PublisherError("production publication pause has an invalid protected schema")
+    if any(
+        direct[key] != "disabled"
+        for key in ("production_post", "production_patch", "production_delete")
+    ):
+        raise PublisherError("production publication pause mutation policy is not disabled")
+    retired = {
+        line.removeprefix("    - ")
+        for line in nested["retired_registrations"]
+        if re.fullmatch(r"    - .+", line)
+    }
+    if retired != HISTORICAL_DIAGNOSTIC_REGISTRATIONS or len(
+        nested["retired_registrations"]
+    ) != len(retired):
+        raise PublisherError("production publication pause historical registrations are invalid")
+    historical: dict[str, str] = {}
+    for line in nested["historical_evidence"]:
+        match = re.fullmatch(r"    ([A-Za-z][A-Za-z0-9_-]*):\s*(\S+)\s*", line)
+        if not match or match.group(1) in historical:
+            raise PublisherError("production publication pause historical evidence is invalid")
+        historical[match.group(1)] = match.group(2)
+    if historical != HISTORICAL_DIAGNOSTIC_EVIDENCE:
+        raise PublisherError("production publication pause historical evidence does not match")
+    return ProductionPublicationPause(
+        state=expected["state"],
+        reason=expected["reason"],
+        durable_permission=expected["durable_permission"],
+        diagnostic_state=expected["diagnostic_state"],
+    )
 
 
 def parse_registration(manifest: str, ticket_id: str) -> Registration:
@@ -844,93 +988,22 @@ def parse_registration(manifest: str, ticket_id: str) -> Registration:
 def parse_paired_comment_diagnostic_registration(
     manifest: str,
 ) -> PairedCommentDiagnosticRegistration | None:
-    """Parse the optional controller-owned diagnostic registration.
+    """Reject the retired diagnostic registration; absence is the only state."""
 
-    The block is deliberately outside the ticket list so it cannot be
-    mistaken for W11-010 production registration.  Absence is the safe,
-    dormant default; a present but malformed block fails closed.
-    """
-
-    lines = manifest.splitlines()
-    matches = [
-        index
-        for index, line in enumerate(lines)
-        if line == "paired_comment_diagnostic_registration:"
-    ]
-    if not matches:
-        return None
-    if len(matches) != 1:
-        raise PublisherError(
-            "manifest must contain exactly one paired comment diagnostic registration"
-        )
-    index = matches[0] + 1
-    child: list[str] = []
-    while index < len(lines):
-        line = lines[index]
-        if line and not line.startswith("  "):
-            break
-        if line.strip():
-            child.append(line)
-        index += 1
-    if len(child) != 2:
-        raise PublisherError("paired comment diagnostic registration has an unexpected schema")
-    version_match = re.fullmatch(r"  version:\s*(\S+)\s*", child[0])
-    pr_match = re.fullmatch(r"  pr_number:\s*(\S+)\s*", child[1])
-    if not version_match or version_match.group(1) != str(PAIRED_COMMENT_DIAGNOSTIC_VERSION):
-        raise PublisherError("paired comment diagnostic registration version is invalid")
-    if not pr_match or not pr_match.group(1).isdigit() or int(pr_match.group(1)) <= 0:
-        raise PublisherError("paired comment diagnostic registration pr_number is invalid")
-    return PairedCommentDiagnosticRegistration(
-        version=PAIRED_COMMENT_DIAGNOSTIC_VERSION,
-        pr_number=int(pr_match.group(1)),
-    )
+    if any(line == "paired_comment_diagnostic_registration:" for line in manifest.splitlines()):
+        raise _retired_registration_error("paired_comment_diagnostic_registration")
+    return None
 
 
 def parse_pr_comment_authorization_continuation_registration(
     manifest: str,
 ) -> PrCommentAuthorizationContinuationRegistration | None:
-    """Parse the optional, exact-PR controller continuation registration.
+    """Reject the retired continuation registration; absence is the only state."""
 
-    The registration is intentionally independent from the v1 paired probe.
-    Its absence is the safe default.  A malformed present block fails closed
-    instead of falling back to either diagnostic or production publication.
-    """
-
-    lines = manifest.splitlines()
     key = f"{PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION}:"
-    matches = [index for index, line in enumerate(lines) if line == key]
-    if not matches:
-        return None
-    if len(matches) != 1:
-        raise PublisherError(
-            "manifest must contain exactly one PR comment authorization continuation registration"
-        )
-    index = matches[0] + 1
-    child: list[str] = []
-    while index < len(lines):
-        line = lines[index]
-        if line and not line.startswith("  "):
-            break
-        if line.strip():
-            child.append(line)
-        index += 1
-    if len(child) != 2:
-        raise PublisherError(
-            "PR comment authorization continuation registration has an unexpected schema"
-        )
-    version_match = re.fullmatch(r"  version:\s*(\S+)\s*", child[0])
-    pr_match = re.fullmatch(r"  pr_number:\s*(\S+)\s*", child[1])
-    if (
-        not version_match
-        or version_match.group(1) != str(PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION)
-    ):
-        raise PublisherError("PR comment authorization continuation version is invalid")
-    if not pr_match or not pr_match.group(1).isdigit() or int(pr_match.group(1)) <= 0:
-        raise PublisherError("PR comment authorization continuation pr_number is invalid")
-    return PrCommentAuthorizationContinuationRegistration(
-        version=PR_COMMENT_AUTHORIZATION_CONTINUATION_VERSION,
-        pr_number=int(pr_match.group(1)),
-    )
+    if any(line == key for line in manifest.splitlines()):
+        raise _retired_registration_error(PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION)
+    return None
 
 
 def registered_registrations(manifest: str) -> dict[str, Registration]:
@@ -1148,11 +1221,11 @@ class PrCommentAuthorizationContinuationResult:
 
 
 class PairedCommentDiagnostic:
-    """Bounded, non-production paired comment diagnostic.
+    """Historical implementation retained for evidence; execution is retired.
 
-    This intentionally uses ``GithubApi``/``UrllibTransport`` from the
-    trusted finalizer.  It never creates, updates, labels, or closes an issue
-    and never writes a W11-010 production projection.
+    ``run`` fails before any read or mutation.  The protected cleanup manifest
+    records the consumed diagnostic separately from this inert compatibility
+    type.
     """
 
     _targets = (
@@ -1418,6 +1491,7 @@ class PairedCommentDiagnostic:
         return True
 
     def run(self, source_run: VerifiedRun, source_pull: VerifiedPull) -> PairedCommentDiagnosticResult:
+        raise _retired_registration_error("paired_comment_diagnostic_registration")
         if self.config.repository.lower() != CANONICAL_REPOSITORY.lower():
             raise PublisherError("paired comment diagnostic requires the canonical repository")
         if source_pull.number != self.registration.pr_number:
@@ -1498,12 +1572,10 @@ class PairedCommentDiagnostic:
 
 
 class PrCommentAuthorizationContinuation:
-    """Fixed one-shot, PR13-only continuation for the approved repair probe.
+    """Historical continuation implementation retained as inert evidence.
 
-    This path is intentionally separate from the v1 paired probe. It reads
-    the historical Issue #17 marker as a fence, but never mutates Issue #17.
-    The finalizer identity is fixed by code and verified from the current run;
-    no workflow-run list is consulted or elected from.
+    The former fixed-run PR-only write path is retired; ``run`` fails before
+    any read or mutation, and the old finalizer identity is not selected.
     """
 
     def __init__(
@@ -1789,6 +1861,7 @@ class PrCommentAuthorizationContinuation:
         source_run: VerifiedRun,
         source_pull: VerifiedPull,
     ) -> PrCommentAuthorizationContinuationResult:
+        raise _retired_registration_error(PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION)
         if self.config.repository.lower() != CANONICAL_REPOSITORY.lower():
             raise PublisherError(
                 "PR comment authorization continuation requires the canonical repository"
@@ -2798,64 +2871,58 @@ class PostMergePublisher:
         | PrCommentAuthorizationContinuationResult
         | list[PublisherResult]
     ):
-        """Run the gated paired probe or preserve normal reconciliation.
+        """Run the production guard for the consumed diagnostic cleanup.
 
-        The continuation branch is a controller-authorized, one-shot exception
-        reachable only from a ``workflow_run`` delivery.  It requires the
-        fixed finalizer identity, a controller-supplied registration whose PR
-        is the exact merged PR for this trusted producer run, a passing
-        producer/check-suite result, and ``protected_tip == source_run.sha``.
-        Any mismatch raises before mutation; while that registration remains
-        visible, later ``workflow_run`` deliveries continue to fail closed
-        until separately authorized cleanup removes the registration.  A
-        non-continuation context uses the existing reducer, including normal
-        failure handling.
+        The current cleanup state is deliberately fail-closed: both ``workflow_run``
+        deliveries and ordinary ``workflow_dispatch`` reconciliation verify
+        the protected tip and, when supplied, the producer run/merged PR with
+        GET-only calls, then return a non-zero ``pending-authorization``
+        failure.  The consumed diagnostic identities are never re-armed.  A
+        later delivery remains blocked until a separately authorized cleanup
+        changes the protected pause; this does not mean every other context is
+        normal, and it does not consume the code retry budget.  The isolated
+        simulation entrypoint is handled before this method and is unaffected.
         """
 
-        if event_name != "workflow_run" or preferred_run_id is None:
-            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
         protected_tip = _require_sha(
             self.api.branch_tip("develop"),
             "protected develop tip",
         )
         protected_manifest = self.api.manifest(self.config.manifest_path, protected_tip)
-        continuation = parse_pr_comment_authorization_continuation_registration(
-            protected_manifest
-        )
-        if continuation is not None:
-            finalizer = self._verify_fixed_finalizer_identity()
+        pause = parse_production_publication_pause(protected_manifest)
+        if pause is None:
+            raise PublisherError(
+                "production publication blocked/pending-authorization; "
+                "protected publication pause is missing; "
+                "zero production POST/PATCH/DELETE",
+                category="pending-authorization",
+            )
+        # These retired keys are an explicit fail-closed signal, never a way
+        # to re-arm a probe.  Historical evidence uses nested status fields,
+        # not these top-level executable registration keys.
+        for registration_name in (
+            "paired_comment_diagnostic_registration",
+            PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION,
+        ):
+            if any(
+                line == f"{registration_name}:"
+                for line in protected_manifest.splitlines()
+            ):
+                raise _retired_registration_error(registration_name)
+        if preferred_run_id is not None:
             source_run = self._verify_run(preferred_run_id, preferred_run_attempt)
             if protected_tip != source_run.sha:
                 raise PublisherError(
-                    "protected develop tip does not match continuation source SHA"
+                    "protected develop tip does not match source run SHA; "
+                    "production publication remains pending-authorization",
+                    category="pending-authorization",
                 )
-            if source_run.quality != "pass":
-                raise PublisherError(
-                    "PR comment authorization continuation requires a passing producer run"
-                )
-            source_pull = self._verified_pull_for_sha(source_run.sha)
-            if source_pull.number != continuation.pr_number:
-                raise PublisherError(
-                    "current source PR does not match the continuation registration"
-                )
-            return PrCommentAuthorizationContinuation(
-                self.api,
-                self.config,
-                continuation,
-                finalizer,
-            ).run(source_run, source_pull)
-        registration = parse_paired_comment_diagnostic_registration(protected_manifest)
-        if registration is None:
-            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
-        source_run = self._verify_run(preferred_run_id, preferred_run_attempt)
-        source_pull = self._verified_pull_for_sha(source_run.sha)
-        if source_pull.number != registration.pr_number:
-            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
-        if source_run.quality != "pass":
-            return self.reconcile_all(preferred_run_id, preferred_run_attempt)
-        return PairedCommentDiagnostic(self.api, self.config, registration).run(
-            source_run,
-            source_pull,
+            self._verified_pull_for_sha(source_run.sha)
+        raise PublisherError(
+            "production publication blocked/pending-authorization; "
+            "diagnostic identity consumed; zero production POST/PATCH/DELETE; "
+            "Issue #14 and retry state unchanged",
+            category="pending-authorization",
         )
 
     def reconcile_all(
@@ -3167,7 +3234,7 @@ def _cli() -> int:
     parser.add_argument(
         "--diagnostic-aware",
         action="store_true",
-        help="只在 trusted workflow_run 與 controller registration 精確匹配時執行 paired comment diagnostic；否則維持既有 reconciliation。",
+        help="保留舊呼叫相容性；production reconciliation 一律經過 pause／authorization guard。",
     )
     parser.add_argument("--finalizer-run-id", default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--finalizer-run-url", default=os.environ.get("GITHUB_SERVER_URL", "") + "/" + os.environ.get("GITHUB_REPOSITORY", "") + "/actions/runs/" + os.environ.get("GITHUB_RUN_ID", ""))
@@ -3217,24 +3284,21 @@ def _cli() -> int:
                 finalizer_job=finalizer_job,
             ),
         )
-        if args.diagnostic_aware:
-            result = publisher.reconcile_diagnostic_or_normal(
-                run_id,
-                run_attempt,
-                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-            )
-            if isinstance(
-                result,
-                (
-                    PairedCommentDiagnosticResult,
-                    PrCommentAuthorizationContinuationResult,
-                ),
-            ):
-                print(json.dumps(result.as_dict(), sort_keys=True))
-                return 0
-            results = result
-        else:
-            results = publisher.reconcile_all(run_id, run_attempt)
+        result = publisher.reconcile_diagnostic_or_normal(
+            run_id,
+            run_attempt,
+            event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+        )
+        if isinstance(
+            result,
+            (
+                PairedCommentDiagnosticResult,
+                PrCommentAuthorizationContinuationResult,
+            ),
+        ):
+            print(json.dumps(result.as_dict(), sort_keys=True))
+            return 0
+        results = result
         if len(results) == 1:
             print(json.dumps(results[0].as_dict(), sort_keys=True))
         else:
