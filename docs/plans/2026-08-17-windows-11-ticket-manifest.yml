@@ -397,7 +397,38 @@ status_values:
   - Merged
   - Done
 required_check: required / gate
-production_publication_pause:
+production_publication_authorization:
+  version: 1
+  state: enabled
+  reason: explicit-user-authorization
+  durable_permission: approved
+  approval_basis: user_explicit_approval_independent_production_pr_and_durable_pr_comments_and_repair_publication
+  repository: Wells-sideproj/obs-voice-command-windows
+  ticket_id: W11-010
+  lineage_root_pr_number: 13
+  producer_workflow_id: 373741435
+  producer_workflow_path: .github/workflows/post-merge.yml
+  finalizer_workflow_id: 373741433
+  finalizer_workflow_path: .github/workflows/post-merge-finalize.yml
+  finalizer_job: finalize
+  allowed_events: [workflow_run, workflow_dispatch]
+  dispatch_ref: refs/heads/develop
+  allowed_mutations: [registered_pr_publisher_comments, production_repair_issue_lifecycle, production_repair_publisher_labels]
+  production_delete: disabled
+  diagnostic_state: consumed
+historical_diagnostic_anchors:
+  version: 1
+  entries:
+    - ticket_id: W11-010
+      lineage_root_pr_number: 13
+      issue_number: 14
+      issue_id: 5689928254
+      issue_node_id: I_kwDOT8W6Tc8AAAABUyVqPg
+      creator_user_id: 34418952
+      scope: sanitized_http_error_diagnostics_only
+      publisher_mutation: forbidden
+# 非執行歷史：保留 cleanup 當時原樣的 pause payload。
+historical_production_publication_pause:
   state: blocked
   reason: pending-authorization
   durable_permission: awaiting_explicit_authorization
@@ -419,6 +450,12 @@ production_publication_pause:
     producer_run_id: 37281618408
     producer_sha: 27c8fb321c7dc5bcc7280197d46dd7c44fdb1d7b
     pr13_comment_id: 5990563780
+historical_cleanup_run_six:
+  finalizer_run_url: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/37462042019
+  source_sha: 0715c59b454dd7ae07919c4fe4c3b1a8381cecde
+  result: pending-authorization
+  production_mutations: 0
+  code_retry_budget_consumed: false
 orchestrator_rules:
   stop_after_ticket_done: null
   execution_state: running
@@ -1085,7 +1122,7 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: Blocked
+    status: PR
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
     post_merge_registration:
@@ -1097,6 +1134,15 @@ tickets:
         - pr_number: 15
           predecessor_pr_number: 13
           repair_issue_number: 14
+        - pr_number: 21
+          predecessor_pr_number: 15
+          repair_issue_number: 14
+    production_activation:
+      state: PR
+      pr_number: 21
+      pr_url: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/21
+      historical_diagnostic_anchor: 14
+      production_repair_issue_number: null
     diagnostic_repair:
       state: PR
       issue_number: 14
@@ -1112,21 +1158,27 @@ tickets:
       scope: sanitized_http_error_diagnostics_only
     post_merge_arbitration:
       state: resolved
-      decision: needs_human
+      decision: targeted_repair
       route: windows_arbitrator
       model: gpt-6-astra
       model_reasoning_effort: medium
-      root_cause: unresolved
-      human_input: cleanup_only_no_durable_production_write
-      durable_permission: awaiting_explicit_authorization
+      agent_id: 01a116df-deb7-7262-9de8-67b9d41a97f4
+      root_cause: approved_production_activation_requires_strict_authorization_contract
+      human_input: independent_production_pr_and_durable_pr_write_approved
+      durable_permission: approved
+      approval_text: "批准"
+      approval_scope: independent_production_pr_durable_finalizer_pr_comments_and_repair_publication
+      human_input_required: false
+      evidence: docs/validation/w11-010-production-authorization-arbitration.json
+      baseline_sha: 0715c59b454dd7ae07919c4fe4c3b1a8381cecde
       evidence_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/37104847448
     diagnostic_cleanup:
       state: consumed
       diagnostic_consumed: true
       paired_comment_diagnostic_registration: retired
       pr_comment_authorization_continuation_registration: retired
-      production_publication: blocked
-      durable_permission: awaiting_explicit_authorization
+      historical_production_publication: blocked
+      historical_durable_permission: awaiting_explicit_authorization
     execution:
       escalation_threshold: low
     arbitration:
@@ -1143,7 +1195,7 @@ tickets:
       pre_pr_follow_up_gate: local_directed_repairs_verified_pending_pr_ci
       human_input_required: false
       confidence: high
-      finalizer_permissions: [contents_read, actions_read, checks_read, pull_requests_read, issues_write]
+      finalizer_permissions: [contents_read, actions_read, checks_read, pull_requests_write, issues_write]
       acceptance_phases: [pre_merge_fake_transport, exact_merged_sha_producer_and_finalizer, isolated_live_simulation_pass_fail_rerun]
     retry:
       state: none
