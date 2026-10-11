@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -52,6 +53,40 @@ SIMULATION_CASES = ("pass", "fail", "rerun")
 PRODUCTION_PUBLICATION_PAUSE_KEY = "production_publication_pause"
 PRODUCTION_PUBLICATION_PAUSE_REASON = "pending-authorization"
 PRODUCTION_PUBLICATION_DURABLE_PERMISSION = "awaiting_explicit_authorization"
+PRODUCTION_AUTHORIZATION_KEY = "production_publication_authorization"
+PRODUCER_WORKFLOW_ID = 373741435
+# 狹義 YAML 契約：只接受這些 canonical scalars / inline sequences，不解析別名或型別轉換。
+AUTHORIZATION_FIELDS = {
+    "version": "1",
+    "state": "enabled",
+    "reason": "explicit-user-authorization",
+    "durable_permission": "approved",
+    "approval_basis": "user_explicit_approval_independent_production_pr_and_durable_pr_comments_and_repair_publication",
+    "repository": CANONICAL_REPOSITORY,
+    "ticket_id": "W11-010",
+    "lineage_root_pr_number": "13",
+    "producer_workflow_id": str(PRODUCER_WORKFLOW_ID),
+    "producer_workflow_path": DEFAULT_WORKFLOW_PATH,
+    "finalizer_workflow_id": "373741433",
+    "finalizer_workflow_path": ".github/workflows/post-merge-finalize.yml",
+    "finalizer_job": "finalize",
+    "allowed_events": "[workflow_run, workflow_dispatch]",
+    "dispatch_ref": "refs/heads/develop",
+    "allowed_mutations": "[registered_pr_publisher_comments, production_repair_issue_lifecycle, production_repair_publisher_labels]",
+    "production_delete": "disabled",
+    "diagnostic_state": "consumed",
+}
+HISTORICAL_ANCHOR_BLOCK = """  version: 1
+  entries:
+    - ticket_id: W11-010
+      lineage_root_pr_number: 13
+      issue_number: 14
+      issue_id: 5689928254
+      issue_node_id: I_kwDOT8W6Tc8AAAABUyVqPg
+      creator_user_id: 34418952
+      scope: sanitized_http_error_diagnostics_only
+      publisher_mutation: forbidden"""
+PUBLISHER_LABELS = frozenset({"type:repair", "status:ready", "status:blocked", "status:done", "needs-human"})
 HISTORICAL_DIAGNOSTIC_REGISTRATIONS = frozenset(
     {
         "paired_comment_diagnostic_registration (historical version 1)",
@@ -806,26 +841,69 @@ def _retired_registration_error(name: str) -> PublisherError:
 
 
 def _production_pause_block(manifest: str) -> list[str] | None:
+    return _control_block(manifest, PRODUCTION_PUBLICATION_PAUSE_KEY)
+
+
+def _control_block(manifest: str, key: str) -> list[str] | None:
+    """只接受唯一、明確的 top-level block；malformed key 不得被當成 absent。"""
     lines = manifest.splitlines()
     matches = [
         index
         for index, line in enumerate(lines)
-        if line == f"{PRODUCTION_PUBLICATION_PAUSE_KEY}:"
+        if re.match(rf"^[\"']?{re.escape(key)}[\"']?(?:\s|:|$)", line)
     ]
     if len(matches) > 1:
-        raise PublisherError("manifest contains duplicate production publication pause blocks")
+        raise PublisherError(f"manifest contains duplicate {key.replace('_', ' ')} blocks")
     if not matches:
         return None
+    if lines[matches[0]] != f"{key}:":
+        raise PublisherError(f"malformed {key} block")
     child: list[str] = []
     index = matches[0] + 1
     while index < len(lines):
         line = lines[index]
-        if line and not line.startswith("  "):
+        if not line.strip() or line.lstrip().startswith("#"):
+            index += 1
+            continue
+        if not line[0].isspace():
             break
-        if line.strip():
-            child.append(line)
+        child.append(line)
         index += 1
     return child
+
+
+def parse_production_authorization(manifest: str) -> bool:
+    """回傳 enabled；pause-only 與新 blocked contract 都保持零寫入。"""
+    for key in ("paired_comment_diagnostic_registration", PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION):
+        if _control_block(manifest, key) is not None:
+            raise _retired_registration_error(key)
+    authorization = _control_block(manifest, PRODUCTION_AUTHORIZATION_KEY)
+    pause = _production_pause_block(manifest)
+    if authorization is not None and pause is not None:
+        raise PublisherError("authorization and pause cannot both be current")
+    if authorization is None:
+        if pause is None:
+            raise PublisherError(
+                "production publication blocked/pending-authorization; protected authorization or pause is missing; zero production POST/PATCH/DELETE",
+                category="pending-authorization",
+            )
+        parse_production_publication_pause(manifest)
+        return False
+    fields: dict[str, str] = {}
+    for line in authorization:
+        match = re.fullmatch(r"  ([a-z][a-z0-9_]*): (\S(?:.*\S)?)", line)
+        if not match or match[1] in fields:
+            raise PublisherError("authorization has malformed or duplicate fields")
+        fields[match[1]] = match[2]
+    expected = dict(AUTHORIZATION_FIELDS)
+    if fields.get("state") == "blocked":
+        expected.update(state="blocked", reason="pending-authorization", durable_permission="awaiting_explicit_authorization")
+    if fields != expected:
+        raise PublisherError("authorization has an invalid protected schema")
+    anchors = _control_block(manifest, "historical_diagnostic_anchors")
+    if anchors != HISTORICAL_ANCHOR_BLOCK.splitlines():
+        raise PublisherError("historical diagnostic anchors have an invalid protected schema")
+    return fields["state"] == "enabled"
 
 
 def parse_production_publication_pause(
@@ -833,11 +911,8 @@ def parse_production_publication_pause(
 ) -> ProductionPublicationPause | None:
     """Parse the durable production publication pause, failing closed.
 
-    The pause is intentionally a protected-manifest contract rather than an
-    environment flag.  Missing pause state is tolerated for reducer unit
-    fixtures, while the committed W11-010 manifest carries the complete
-    blocked contract.  A partial or malformed protected pause never falls
-    back to production publication.
+    Absence is handled by parse_production_authorization, which requires
+    exactly one current control. A partial pause never authorizes publication.
     """
 
     child = _production_pause_block(manifest)
@@ -990,7 +1065,7 @@ def parse_paired_comment_diagnostic_registration(
 ) -> PairedCommentDiagnosticRegistration | None:
     """Reject the retired diagnostic registration; absence is the only state."""
 
-    if any(line == "paired_comment_diagnostic_registration:" for line in manifest.splitlines()):
+    if _control_block(manifest, "paired_comment_diagnostic_registration") is not None:
         raise _retired_registration_error("paired_comment_diagnostic_registration")
     return None
 
@@ -1000,8 +1075,7 @@ def parse_pr_comment_authorization_continuation_registration(
 ) -> PrCommentAuthorizationContinuationRegistration | None:
     """Reject the retired continuation registration; absence is the only state."""
 
-    key = f"{PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION}:"
-    if any(line == key for line in manifest.splitlines()):
+    if _control_block(manifest, PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION) is not None:
         raise _retired_registration_error(PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION)
     return None
 
@@ -1097,6 +1171,8 @@ class PublisherConfig:
     finalizer_run_number: int | None = None
     finalizer_run_attempt: int | None = None
     finalizer_job: str | None = None
+    event_name: str | None = None
+    ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1113,6 +1189,17 @@ class VerifiedRun:
     provider: str
     job_conclusions: Mapping[str, str]
     failed_steps: tuple[str, ...]
+    started_at: str = ""
+
+    @property
+    def order_key(self) -> tuple[datetime, int, int]:
+        try:
+            value = datetime.fromisoformat(self.started_at.replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                raise ValueError("missing timezone")
+        except (ValueError, AttributeError) as exc:
+            raise PublisherError("source run has no trusted ordering timestamp") from exc
+        return value, self.run_id, self.run_attempt
 
 
 @dataclass(frozen=True)
@@ -1905,6 +1992,98 @@ class PostMergePublisher:
         self.config = config
         self._workflow_id: int | None = None
         self._resolved_ticket_id: str | None = config.ticket_id
+        self._protected_snapshot: tuple[str, str] | None = None
+        self._mutation_context: tuple[Any, ...] | None = None
+        self._mutation_requires_latest = False
+
+    def _authorize_production(
+        self, run_id: int | None = None, attempt: int | None = None,
+    ) -> tuple[str, str]:
+        tip = self.api.branch_tip("develop")
+        manifest = self.api.manifest(self.config.manifest_path, tip)
+        enabled = parse_production_authorization(manifest)
+        if not enabled:
+            if run_id is not None:
+                source = self._verify_run(run_id, attempt)
+                if source.sha != tip:
+                    raise PublisherError("protected develop tip does not match source run SHA; pending-authorization", category="pending-authorization")
+                self._verified_pull_for_sha(source.sha)
+            raise PublisherError(
+                "production publication blocked/pending-authorization; diagnostic identity consumed; zero production POST/PATCH/DELETE; Issue #14 and retry state unchanged",
+                category="pending-authorization",
+            )
+        if (
+            self.config.repository != CANONICAL_REPOSITORY
+            or self.api.repository != CANONICAL_REPOSITORY
+            or self.config.workflow_path != DEFAULT_WORKFLOW_PATH
+            or self.config.manifest_path != DEFAULT_MANIFEST_PATH
+            or self.config.required_jobs != DEFAULT_REQUIRED_JOBS
+            or self.config.publisher_logins != ("github-actions[bot]",)
+            or self.config.ticket_id not in {None, "W11-010"}
+        ):
+            raise PublisherError("publisher scope is outside protected authorization")
+        if self.config.event_name not in {"workflow_run", "workflow_dispatch"}:
+            raise PublisherError("production requires an authorized finalizer event")
+        if self.config.ref != "refs/heads/develop" or self.config.finalizer_job != FINALIZER_JOB:
+            raise PublisherError("production requires protected develop and finalize job")
+        repository = self.api.repository_info()
+        workflow = self.api.workflow("post-merge.yml")
+        finalizer = self.api.workflow("post-merge-finalize.yml")
+        if (
+            repository.get("full_name") != CANONICAL_REPOSITORY
+            or workflow.get("id") != PRODUCER_WORKFLOW_ID
+            or workflow.get("path") != DEFAULT_WORKFLOW_PATH
+            or finalizer.get("id") != FINALIZER_WORKFLOW_ID
+            or finalizer.get("path") != FINALIZER_WORKFLOW_PATH
+        ):
+            raise PublisherError("production workflow or repository identity changed")
+        finalizer_id = _positive_int(self.config.finalizer_run_id, "finalizer run id")
+        finalizer_attempt = _positive_int(self.config.finalizer_run_attempt, "finalizer attempt")
+        finalizer_number = _positive_int(self.config.finalizer_run_number, "finalizer run number")
+        actual = self.api.run(finalizer_id)
+        actual_repository = actual.get("repository")
+        if (
+            actual.get("id") != finalizer_id
+            or actual.get("workflow_id") != FINALIZER_WORKFLOW_ID
+            or actual.get("path") != FINALIZER_WORKFLOW_PATH
+            or actual.get("run_attempt") != finalizer_attempt
+            or actual.get("run_number") != finalizer_number
+            or not isinstance(actual_repository, dict)
+            or actual_repository.get("full_name") != CANONICAL_REPOSITORY
+            or actual.get("event") != self.config.event_name
+            or actual.get("head_branch") != "develop"
+            or actual.get("status") not in {"queued", "in_progress", "completed"}
+            or (actual.get("status") == "completed" and actual.get("conclusion") != "success")
+        ):
+            raise PublisherError("finalizer run is not the authorized invocation")
+        registration = parse_registration(manifest, "W11-010")
+        if registration.root_pr_number != 13:
+            raise PublisherError("registration root is outside protected authorization")
+        self._workflow_id = PRODUCER_WORKFLOW_ID
+        return tip, manifest
+
+    def _before_write(self) -> None:
+        # 每次 POST/PATCH/PUT 都重新檢查授權與來源；私有 helper 也不能繞過 guard。
+        if self._mutation_context is None:
+            self._authorize_production()
+            raise PublisherError("production mutation requires a verified reconciliation context")
+        self._revalidate_before_mutation(
+            *self._mutation_context, require_latest_source=self._mutation_requires_latest,
+        )
+
+    def _guarded_write(self, operation: Any, read_back: Any) -> Any:
+        self._before_write()
+        try:
+            operation()
+        except PublisherError as exc:
+            # 不確定的 response 只讀回，不重送；403 等明確拒絕保留非零結果。
+            if not (exc.category == "infrastructure" or isinstance(exc, ApiError) and exc.status >= 500):
+                raise
+            try:
+                return read_back()
+            except PublisherError:
+                raise exc
+        return read_back()
 
     def _ticket_id(self) -> str:
         if not self._resolved_ticket_id:
@@ -1998,6 +2177,8 @@ class PostMergePublisher:
             raise PublisherError("source run repository is not the trusted repository")
         if _positive_int(run.get("workflow_id"), "source workflow id") != workflow_id:
             raise PublisherError("source run belongs to a different workflow")
+        if run.get("path") is not None and run.get("path") != self.config.workflow_path:
+            raise PublisherError("source run path does not match the trusted workflow")
         if run.get("event") != "push" or run.get("head_branch") != "develop":
             raise PublisherError("source run is not a protected develop push")
         if run.get("status") != "completed":
@@ -2079,6 +2260,24 @@ class PostMergePublisher:
         if not provider:
             raise PublisherError("source check suite has no provider identity")
         suite_conclusion = suite.get("conclusion")
+        # Rerun 的 suite 是可變 summary；舊 attempt 仍以 attempt-specific
+        # run/jobs 為準。只有重新確認同一 run 已有較新 attempt，才能忽略
+        # suite 的新 conclusion；suite ID/provider/SHA 驗證仍完整保留。
+        if expected_attempt is not None and suite_conclusion != run_conclusion:
+            latest = self.api.run(run_id)
+            latest_attempt = _positive_int(latest.get("run_attempt"), "latest run attempt")
+            if latest_attempt > attempt:
+                if (
+                    latest.get("id") != run_id
+                    or latest.get("head_sha") != sha
+                    or latest.get("workflow_id") != workflow_id
+                    or latest.get("repository") != run.get("repository")
+                    or latest.get("event") != "push"
+                    or latest.get("head_branch") != "develop"
+                    or latest.get("check_suite_id") != suite_id
+                ):
+                    raise PublisherError("historical attempt suite identity changed")
+                suite_conclusion = run_conclusion
         if run_conclusion == "success" and suite_conclusion == "success" and all(
             conclusion == "success" for conclusion in job_conclusions.values()
         ):
@@ -2110,6 +2309,7 @@ class PostMergePublisher:
             provider=provider,
             job_conclusions=job_conclusions,
             failed_steps=tuple(failed_steps),
+            started_at=str(run.get("run_started_at") or ""),
         )
 
     def _verified_pull_for_sha(self, sha: str) -> VerifiedPull:
@@ -2158,6 +2358,8 @@ class PostMergePublisher:
             self.api.manifest(self.config.manifest_path, protected_tip),
             self._ticket_id(),
         )
+        if current_manifest.ticket_id != "W11-010" or current_manifest.root_pr_number != 13:
+            raise PublisherError("registration is outside protected authorization")
         if current_manifest.attempts[: len(source_manifest.attempts)] != source_manifest.attempts:
             raise PublisherError("current protected registration is not an extension of the source registration")
         if source_pull.number not in {attempt.pr_number for attempt in source_manifest.attempts}:
@@ -2178,6 +2380,8 @@ class PostMergePublisher:
             ):
                 raise PublisherError(f"registered PR #{attempt.pr_number} is not a merged develop PR")
             merge_sha = _require_sha(pull.get("merge_commit_sha"), f"PR #{attempt.pr_number} merge_commit_sha")
+            if self.api.compare(merge_sha, protected_tip).get("status") not in {"ahead", "identical"}:
+                raise PublisherError("registered PR is not an ancestor of protected develop")
             if index and current_manifest.attempts[index - 1].pr_number in pulls:
                 previous = pulls[current_manifest.attempts[index - 1].pr_number].merge_sha
                 if self.api.compare(previous, merge_sha).get("status") not in {"ahead", "identical"}:
@@ -2213,6 +2417,8 @@ class PostMergePublisher:
     ]:
         """在任何 GitHub mutation 前重讀受保護 registration、PR 與 run。"""
 
+        if self._authorize_production() != self._protected_snapshot:
+            raise PublisherError("protected authorization or manifest changed before publication")
         fresh_run = self._verify_run(source_run.run_id, source_run.run_attempt)
         if fresh_run != source_run:
             raise PublisherError("source run changed before publication")
@@ -2242,6 +2448,11 @@ class PostMergePublisher:
         latest_pull = fresh_pulls[latest_attempt.pr_number]
         if require_latest_source and latest_pull != fresh_pull:
             raise PublisherError("source PR is no longer the latest protected registration")
+        self._mutation_context = (
+            fresh_run, fresh_pull, fresh_source_registration, fresh_current_registration,
+            fresh_pulls, fresh_lineage, fresh_tip,
+        )
+        self._mutation_requires_latest = require_latest_source
         return (
             fresh_run,
             fresh_pull,
@@ -2340,6 +2551,12 @@ class PostMergePublisher:
     def _publish_pr_pass_locked(
         self, source_pull: VerifiedPull, run: VerifiedRun, lineage: str
     ) -> None:
+        self._before_write()
+        assert self._mutation_context is not None
+        historical = (
+            self._mutation_context[3].attempts[-1].pr_number != source_pull.number
+            or run.sha != self._mutation_context[6]
+        )
         payload = {
             "kind": "w11-010-pass",
             "version": 1,
@@ -2357,50 +2574,54 @@ class PostMergePublisher:
             "required_jobs": dict(run.job_conclusions),
             "finalizer_run_id": self.config.finalizer_run_id,
             "finalizer_run_url": self.config.finalizer_run_url,
+            "historical": historical,
+            "completion_eligible": not historical,
         }
         body = self._projection_body(
             PASS_MARKER,
             payload,
             [
-                f"W11-010 post-merge Layer A PASS for `{run.sha}`.",
+                f"W11-010 post-merge Layer A {'historical ' if historical else ''}PASS for `{run.sha}`.",
                 f"Verified producer run `{run.run_id}` attempt `{run.run_attempt}`: {run.url}.",
                 f"Verified workflow `{run.workflow_id}` `{run.workflow_path}` and GitHub Actions check suite `{run.check_suite_id}` ({run.provider}).",
                 f"Merged PR: #{source_pull.number} ({source_pull.url}).",
             ],
         )
-        comments = self.api.issue_comments(source_pull.number)
-        matches = []
-        for comment in comments:
-            payload_value = self._machine_payload(comment.get("body"), PASS_MARKER)
-            if payload_value is None:
-                continue
-            if not self._trusted_projection_author(comment):
-                raise PublisherError("PASS projection marker belongs to an untrusted author")
-            self._validate_pass_payload(
-                payload_value,
-                source_pull=source_pull,
-                run=run,
-                lineage=lineage,
-            )
-            matches.append(comment)
-        if len(matches) > 1:
-            raise PublisherError("multiple trusted PASS projections exist for the verified PR")
-        if matches:
-            comment_id = _positive_int(matches[0].get("id"), "PASS comment id")
-            self.api.update_comment(comment_id, body)
-        else:
-            created = self.api.create_comment(source_pull.number, body)
-            if not self._trusted_projection_author(created):
-                raise PublisherError("created PASS projection was not authored by the trusted bot")
-            created_payload = self._machine_payload(created.get("body"), PASS_MARKER)
-            if created_payload is None:
-                raise PublisherError("created PASS projection lost its machine payload")
-            self._validate_pass_payload(
-                created_payload,
-                source_pull=source_pull,
-                run=run,
-                lineage=lineage,
-            )
+        def find() -> list[Mapping[str, Any]]:
+            matches = []
+            for comment in self.api.issue_comments(source_pull.number):
+                value = self._machine_payload(comment.get("body"), PASS_MARKER)
+                if value is None:
+                    continue
+                if not self._trusted_projection_author(comment):
+                    raise PublisherError("PASS projection marker belongs to an untrusted author")
+                prior = self._verify_run(
+                    _positive_int(value.get("run_id"), "PASS run id"),
+                    _positive_int(value.get("run_attempt"), "PASS run attempt"),
+                )
+                if prior.quality != "pass" or prior.order_key > run.order_key:
+                    raise PublisherError("PASS projection has unverified or newer run evidence")
+                self._validate_pass_payload(value, source_pull=source_pull, run=prior, lineage=lineage)
+                matches.append(dict(comment))
+            if len(matches) > 1:
+                raise PublisherError("multiple trusted PASS projections exist for the verified PR")
+            return matches
+
+        matches = find()
+        def read_back() -> None:
+            actual = find()
+            if len(actual) != 1 or actual[0].get("body") != body:
+                raise PublisherError("PASS publication read-back missing or inconsistent")
+
+        def write() -> None:
+            if find() != matches:
+                raise PublisherError("PASS publication target changed before mutation")
+            if matches:
+                self.api.update_comment(_positive_int(matches[0].get("id"), "PASS comment id"), body)
+            else:
+                self.api.create_comment(source_pull.number, body)
+
+        self._guarded_write(write, read_back)
 
     def _find_repair_issue(self, lineage: str) -> tuple[int, Mapping[str, Any]] | None:
         matches: list[tuple[int, Mapping[str, Any]]] = []
@@ -2408,6 +2629,8 @@ class PostMergePublisher:
             payload = self._machine_payload(issue.get("body"), REPAIR_MARKER)
             if payload is None:
                 continue
+            if issue.get("number") == 14:
+                raise PublisherError("historical Issue14 cannot be a production projection")
             if payload.get("repository") != self.config.repository:
                 continue
             if "ticket_id" not in payload:
@@ -2418,10 +2641,87 @@ class PostMergePublisher:
                 raise PublisherError("repair marker belongs to an untrusted author")
             self._validate_repair_payload(payload, lineage=lineage)
             number = _positive_int(issue.get("number"), "repair issue number")
-            matches.append((number, issue))
+            actual = self.api.issue(number)
+            if actual != issue:
+                raise PublisherError("repair publication target changed during discovery")
+            self._validate_production_issue(actual, lineage)
+            matches.append((number, dict(actual)))
         if len(matches) > 1:
             raise PublisherError("multiple repair issues exist for the same protected lineage")
         return matches[0] if matches else None
+
+    def _validate_production_issue(self, issue: Mapping[str, Any], lineage: str) -> None:
+        number = _positive_int(issue.get("number"), "repair issue number")
+        if (
+            number == 14 or "pull_request" in issue
+            or not self._trusted_projection_author(issue)
+            or issue.get("html_url") != f"https://github.com/{self.config.repository}/issues/{number}"
+        ):
+            raise PublisherError("repair publication target is not a production bot issue")
+        payload = self._machine_payload(issue.get("body"), REPAIR_MARKER)
+        if payload is None:
+            raise PublisherError("repair issue candidate lost its machine payload")
+        self._validate_repair_payload(payload, lineage=lineage)
+        run = self._verify_run(payload["source_run_id"], payload["source_run_attempt"])
+        pull = self._verified_pull_for_sha(run.sha)
+        _, registration, pulls, actual_lineage, _ = self._registered_context(run, pull)
+        if run.quality != "code_failure" or actual_lineage != lineage:
+            raise PublisherError("repair projection has no verified production failure")
+        index = next(i for i, value in enumerate(registration.attempts) if value.pr_number == pull.number)
+        prefix = Registration(registration.version, registration.attempts[:index + 1], registration.ticket_id, registration.completion_profile)
+        failures, _ = self._retry_state(run, prefix, {value.pr_number: pulls[value.pr_number] for value in prefix.attempts}, cutoff=run)
+        expected = self._machine_payload(self._repair_body(
+            lineage=lineage, source_pull=pull, run=run,
+            signature=self._failure_signature(lineage, run), failures=failures,
+        ), REPAIR_MARKER)
+        assert expected is not None
+        if any(payload.get(key) != value for key, value in expected.items() if key not in {"projection_status", "retry_action"}):
+            raise PublisherError("repair projection disagrees with verified failure evidence")
+
+    @staticmethod
+    def _failure_signature(lineage: str, run: VerifiedRun) -> str:
+        return hashlib.sha256(json.dumps({
+            "lineage": lineage, "sha": run.sha, "jobs": run.job_conclusions, "steps": run.failed_steps,
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _update_production_issue(self, number: int, body: str, state: str, lineage: str) -> None:
+        self._before_write()
+        found = self._find_repair_issue(lineage)
+        if found is None or found[0] != number or number == 14:
+            raise PublisherError("repair target changed before update")
+        snapshot = found[1]
+        def write() -> None:
+            if self._find_repair_issue(lineage) != (number, snapshot):
+                raise PublisherError("repair publication target changed before mutation")
+            self.api.update_issue(number, body, state=state)
+        def read_back() -> None:
+            actual = self._find_repair_issue(lineage)
+            if actual is None or actual[0] != number or actual[1].get("body") != body or actual[1].get("state") != state:
+                raise PublisherError("repair publication read-back missing or inconsistent")
+        self._guarded_write(write, read_back)
+
+    def _set_production_labels(self, number: int, labels: Sequence[str], lineage: str) -> None:
+        self._before_write()
+        issue = self.api.issue(number)
+        self._validate_production_issue(issue, lineage)
+        existing = issue.get("labels")
+        if not isinstance(existing, list):
+            raise PublisherError("repair issue labels are malformed")
+        names = [label.get("name") if isinstance(label, dict) else label for label in existing]
+        if any(not isinstance(name, str) for name in names):
+            raise PublisherError("repair issue label names are malformed")
+        desired = sorted((set(names) - PUBLISHER_LABELS) | set(labels))
+        def write() -> None:
+            if self.api.issue(number) != issue:
+                raise PublisherError("repair publication target changed before labels mutation")
+            self.api.set_labels(number, desired)
+        def read_back() -> None:
+            actual = self.api.issue(number)
+            self._validate_production_issue(actual, lineage)
+            actual_names = [value.get("name") if isinstance(value, dict) else value for value in actual.get("labels", [])]
+            if sorted(actual_names) != desired:
+                raise PublisherError("repair label publication read-back inconsistent")
+        self._guarded_write(write, read_back)
 
     def _repair_body(
         self,
@@ -2485,18 +2785,8 @@ class PostMergePublisher:
         lineage: str,
         failures: int,
     ) -> tuple[int, bool]:
-        signature = hashlib.sha256(
-            json.dumps(
-                {
-                    "lineage": lineage,
-                    "sha": run.sha,
-                    "jobs": run.job_conclusions,
-                    "steps": run.failed_steps,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        self._before_write()
+        signature = self._failure_signature(lineage, run)
         body = self._repair_body(
             lineage=lineage,
             source_pull=source_pull,
@@ -2511,22 +2801,20 @@ class PostMergePublisher:
             current_payload = self._machine_payload(issue.get("body"), REPAIR_MARKER)
             if current_payload is None:
                 raise PublisherError("repair issue candidate lost its machine payload")
-            self.api.update_issue(number, body, state="open")
-            self.api.set_labels(number, labels)
+            self._update_production_issue(number, body, "open", lineage)
+            self._set_production_labels(number, labels, lineage)
             return number, False
-        created = self.api.create_issue(
-            f"W11-010 repair for {self._ticket_id()} lineage {lineage}",
-            body,
-            labels,
-        )
-        number = _positive_int(created.get("number"), "created repair issue number")
-        if not self._trusted_projection_author(created):
-            raise PublisherError("created repair issue was not authored by the trusted bot")
-        created_payload = self._machine_payload(created.get("body"), REPAIR_MARKER)
-        if created_payload is None:
-            raise PublisherError("created repair issue lost its machine payload")
-        self._validate_repair_payload(created_payload, lineage=lineage)
-        self.api.set_labels(number, labels)
+        def create() -> None:
+            if self._find_repair_issue(lineage) is not None:
+                raise PublisherError("repair issue appeared before create")
+            self.api.create_issue(f"W11-010 repair for {self._ticket_id()} lineage {lineage}", body, labels)
+        def read_back() -> int:
+            actual = self._find_repair_issue(lineage)
+            if actual is None or actual[1].get("body") != body or actual[1].get("state") != "open":
+                raise PublisherError("created repair publication read-back missing or inconsistent")
+            return actual[0]
+        number = self._guarded_write(create, read_back)
+        self._set_production_labels(number, labels, lineage)
         return number, True
 
     def _close_repair_if_current(self, lineage: str, run: VerifiedRun) -> int | None:
@@ -2534,6 +2822,7 @@ class PostMergePublisher:
             return self._close_repair_if_current_locked(lineage, run)
 
     def _close_repair_if_current_locked(self, lineage: str, run: VerifiedRun) -> int | None:
+        self._before_write()
         found = self._find_repair_issue(lineage)
         if not found:
             return None
@@ -2542,9 +2831,13 @@ class PostMergePublisher:
         if payload is None:
             raise PublisherError("repair issue candidate lost its machine payload")
         self._validate_repair_payload(payload, lineage=lineage)
+        failed = self._verify_run(payload["source_run_id"], payload["source_run_attempt"])
+        if (failed.sha == run.sha and failed.order_key >= run.order_key) or self.api.compare(failed.sha, run.sha).get("status") not in {"ahead", "identical"}:
+            raise PublisherError("repair failure is newer than the verified PASS")
         resolved_body = str(issue.get("body") or "") + f"\n\nResolved by verified PASS run {run.run_id} on `{run.sha}`.\n"
-        self.api.update_issue(number, resolved_body, state="closed")
-        self.api.set_labels(number, ["type:repair", "status:done"])
+        if issue.get("state") != "closed":
+            self._update_production_issue(number, resolved_body, "closed", lineage)
+        self._set_production_labels(number, ["type:repair", "status:done"], lineage)
         return number
 
     def _verified_attempt_history(self, listed: Mapping[str, Any]) -> tuple[VerifiedRun, ...]:
@@ -2582,7 +2875,7 @@ class PostMergePublisher:
                     candidates[(verified.run_id, verified.run_attempt)] = verified
         return max(
             candidates.values(),
-            key=lambda value: (value.run_attempt, value.run_id),
+            key=lambda value: value.order_key,
         )
 
     def _retry_state(
@@ -2590,6 +2883,7 @@ class PostMergePublisher:
         current: VerifiedRun,
         registration: Registration,
         pulls: Mapping[int, VerifiedPull],
+        *, cutoff: VerifiedRun | None = None,
     ) -> tuple[int, int]:
         runs = self.api.workflow_runs(current.workflow_id)
         candidates: dict[str, list[VerifiedRun]] = {pull.merge_sha: [] for pull in pulls.values()}
@@ -2599,12 +2893,15 @@ class PostMergePublisher:
                 for verified in self._verified_attempt_history(listed):
                     candidates[verified.sha].append(verified)
         candidates.setdefault(current.sha, []).append(current)
+        if any(not values for values in candidates.values()):
+            raise PublisherError("registered lineage is missing producer history")
         quality_by_sha: dict[str, str | None] = {}
         infra = 0
         for sha, values in candidates.items():
             unique_values = {
                 (value.run_id, value.run_attempt): value
                 for value in values
+                if cutoff is None or value.order_key <= cutoff.order_key
             }
             # 同一 SHA 的 infra rerun 只作獨立 evidence；retry quality
             # 取最新的 conclusive PASS/code_failure，避免 infra 蓋掉 code failure。
@@ -2616,7 +2913,7 @@ class PostMergePublisher:
             if conclusive:
                 latest_conclusive = max(
                     conclusive,
-                    key=lambda value: (value.run_attempt, value.run_id),
+                    key=lambda value: value.order_key,
                 )
                 quality_by_sha[sha] = latest_conclusive.quality
             else:
@@ -2642,6 +2939,8 @@ class PostMergePublisher:
         return failures, infra
 
     def reconcile(self, run_id: int, run_attempt: int | None = None) -> PublisherResult:
+        self._mutation_context = None
+        self._protected_snapshot = self._authorize_production(run_id, run_attempt)
         source_run = self._verify_run(run_id, run_attempt)
         source_pull = self._verified_pull_for_sha(source_run.sha)
         (
@@ -2655,6 +2954,7 @@ class PostMergePublisher:
         latest_attempt = current_registration.attempts[-1]
         latest_pull = pulls[latest_attempt.pr_number]
         latest_is_source = latest_pull.number == source_pull.number and latest_pull.merge_sha == source_run.sha
+        completion_eligible = latest_is_source and source_run.sha == protected_tip
         if (latest_source_run.run_id, latest_source_run.run_attempt) != (
             source_run.run_id,
             source_run.run_attempt,
@@ -2714,7 +3014,7 @@ class PostMergePublisher:
                 )
                 self._publish_pr_pass_locked(fresh_pull, fresh_run, fresh_lineage)
                 issue_number = None
-                if latest_is_source:
+                if completion_eligible:
                     (
                         fresh_run,
                         fresh_pull,
@@ -2736,9 +3036,9 @@ class PostMergePublisher:
                     issue_number = self._close_repair_if_current_locked(fresh_lineage, fresh_run)
             action = (
                 "layer_b_required"
-                if latest_is_source and "layer_b" in (current_registration.completion_profile or "")
+                if completion_eligible and "layer_b" in (current_registration.completion_profile or "")
                 else "done_candidate"
-                if latest_is_source
+                if completion_eligible
                 else "historical_pass"
             )
             return PublisherResult(
@@ -2758,6 +3058,7 @@ class PostMergePublisher:
                     "repository": self.config.repository,
                     "ticket_id": self._ticket_id(),
                     "completion_profile": current_registration.completion_profile,
+                    "completion_eligible": completion_eligible,
                     "layer_b_required": "layer_b" in (current_registration.completion_profile or ""),
                     "workflow_id": source_run.workflow_id,
                     "workflow_path": source_run.workflow_path,
@@ -2871,59 +3172,15 @@ class PostMergePublisher:
         | PrCommentAuthorizationContinuationResult
         | list[PublisherResult]
     ):
-        """Run the production guard for the consumed diagnostic cleanup.
-
-        The current cleanup state is deliberately fail-closed: both ``workflow_run``
-        deliveries and ordinary ``workflow_dispatch`` reconciliation verify
-        the protected tip and, when supplied, the producer run/merged PR with
-        GET-only calls, then return a non-zero ``pending-authorization``
-        failure.  The consumed diagnostic identities are never re-armed.  A
-        later delivery remains blocked until a separately authorized cleanup
-        changes the protected pause; this does not mean every other context is
-        normal, and it does not consume the code retry budget.  The isolated
-        simulation entrypoint is handled before this method and is unaffected.
-        """
-
-        protected_tip = _require_sha(
-            self.api.branch_tip("develop"),
-            "protected develop tip",
-        )
-        protected_manifest = self.api.manifest(self.config.manifest_path, protected_tip)
-        pause = parse_production_publication_pause(protected_manifest)
-        if pause is None:
-            raise PublisherError(
-                "production publication blocked/pending-authorization; "
-                "protected publication pause is missing; "
-                "zero production POST/PATCH/DELETE",
-                category="pending-authorization",
-            )
-        # These retired keys are an explicit fail-closed signal, never a way
-        # to re-arm a probe.  Historical evidence uses nested status fields,
-        # not these top-level executable registration keys.
-        for registration_name in (
-            "paired_comment_diagnostic_registration",
-            PR_COMMENT_AUTHORIZATION_CONTINUATION_REGISTRATION,
-        ):
-            if any(
-                line == f"{registration_name}:"
-                for line in protected_manifest.splitlines()
-            ):
-                raise _retired_registration_error(registration_name)
-        if preferred_run_id is not None:
-            source_run = self._verify_run(preferred_run_id, preferred_run_attempt)
-            if protected_tip != source_run.sha:
-                raise PublisherError(
-                    "protected develop tip does not match source run SHA; "
-                    "production publication remains pending-authorization",
-                    category="pending-authorization",
-                )
-            self._verified_pull_for_sha(source_run.sha)
-        raise PublisherError(
-            "production publication blocked/pending-authorization; "
-            "diagnostic identity consumed; zero production POST/PATCH/DELETE; "
-            "Issue #14 and retry state unchanged",
-            category="pending-authorization",
-        )
+        """相容入口；診斷永久 retired，授權僅由目前 protected manifest 決定。"""
+        self._authorize_production(preferred_run_id, preferred_run_attempt)
+        if event_name != self.config.event_name:
+            raise PublisherError("finalizer event does not match the verified invocation")
+        if event_name == "workflow_run" and preferred_run_id is None:
+            raise PublisherError("workflow_run requires its producer delivery")
+        if preferred_run_attempt is not None and preferred_run_id is None:
+            raise PublisherError("producer attempt requires a producer run id")
+        return self.reconcile_all(preferred_run_id, preferred_run_attempt)
 
     def reconcile_all(
         self,
@@ -2938,15 +3195,10 @@ class PostMergePublisher:
         the event that woke it up.
         """
 
+        protected_tip, protected_manifest = self._authorize_production(preferred_run_id, preferred_run_attempt)
         workflow_id = self._trusted_workflow_id()
-        protected_tip = self.api.branch_tip("develop")
-        protected_manifest = self.api.manifest(self.config.manifest_path, protected_tip)
-        if self.config.ticket_id is None:
-            registrations = registered_registrations(protected_manifest)
-        else:
-            self._resolved_ticket_id = self.config.ticket_id
-            registration = parse_registration(protected_manifest, self._ticket_id())
-            registrations = {self._ticket_id(): registration}
+        self._resolved_ticket_id = "W11-010"
+        registrations = {"W11-010": parse_registration(protected_manifest, "W11-010")}
         if not registrations:
             raise PublisherError("protected manifest has no registered post-merge ticket")
         registered_shas: dict[str, int] = {}
@@ -2972,6 +3224,8 @@ class PostMergePublisher:
                     pull.get("merge_commit_sha"),
                     f"PR #{attempt.pr_number} merge_commit_sha",
                 )
+                if self.api.compare(sha, protected_tip).get("status") not in {"ahead", "identical"}:
+                    raise PublisherError("registered PR is not an ancestor of protected develop")
                 if previous_sha and self.api.compare(previous_sha, sha).get("status") not in {
                     "ahead",
                     "identical",
@@ -2999,35 +3253,41 @@ class PostMergePublisher:
                 attempt = None
             candidates[(run_id, attempt)] = (order[sha], attempt, sha)
 
+        unregistered: list[PublisherResult] = []
         if preferred_run_id is not None:
-            preferred = self.api.run(preferred_run_id)
-            preferred_sha = _require_sha(preferred.get("head_sha"), "preferred source run head_sha")
-            if preferred_sha not in registered_shas:
-                raise PublisherError("preferred source run is not a registered develop attempt")
-            preferred_attempt = preferred.get("run_attempt")
-            if not isinstance(preferred_attempt, int) or isinstance(preferred_attempt, bool):
-                preferred_attempt = None
-            candidates[(preferred_run_id, preferred_attempt)] = (
-                order[preferred_sha],
-                preferred_attempt,
-                preferred_sha,
-            )
+            preferred = self._verify_run(preferred_run_id, preferred_run_attempt)
+            preferred_pull = self._verified_pull_for_sha(preferred.sha)
+            if self.api.compare(preferred.sha, protected_tip).get("status") not in {"ahead", "identical"}:
+                raise PublisherError("preferred source is not an ancestor of protected develop")
+            if preferred.sha not in registered_shas:
+                unregistered.append(PublisherResult(
+                    status="unregistered", action="non_production_delivery",
+                    source_run_id=preferred.run_id, source_run_attempt=preferred.run_attempt,
+                    source_sha=preferred.sha, source_pr_number=preferred_pull.number,
+                    latest_pr_number=None, lineage_id=None, repair_issue_number=None,
+                    created_repair_issue=False, consecutive_code_failures=0,
+                    infrastructure_failures=0, evidence={"completion_eligible": False},
+                ))
+            else:
+                candidates[(preferred.run_id, preferred.run_attempt)] = (
+                    order[preferred.sha], preferred.run_attempt, preferred.sha,
+                )
 
         if not candidates:
             raise PublisherError("no completed producer run matches a registered develop attempt")
 
-        ordered = sorted(
-            candidates,
-            key=lambda key: (
-                candidates[key][0],
-                candidates[key][1] or 0,
-                key[0],
-            ),
-        )
-        results: list[PublisherResult] = []
+        # 先驗證全部來源與 prefix，避免後段 malformed evidence 發現前先發布前段。
+        verified = {key: self._verify_run(*key) for key in candidates}
+        for run in verified.values():
+            self._registered_context(run, self._verified_pull_for_sha(run.sha))
+        if set(registered_shas) - {run.sha for run in verified.values()}:
+            raise PublisherError("registered lineage is missing producer history")
+        ordered = sorted(candidates, key=lambda key: (candidates[key][0], verified[key].order_key))
+        results: list[PublisherResult] = unregistered
         for run_id, attempt in ordered:
-            expected_attempt = preferred_run_attempt if run_id == preferred_run_id else attempt
-            results.append(self.reconcile(run_id, expected_attempt))
+            if self._authorize_production() != (protected_tip, protected_manifest):
+                raise PublisherError("protected manifest changed during reconciliation")
+            results.append(self.reconcile(run_id, attempt))
         return results
 
 
@@ -3200,6 +3460,9 @@ class SimulationPublisher:
                 if updated_payload is None:
                     raise PublisherError("updated simulation issue lost its machine payload")
                 self._validate_payload(updated_payload)
+            actual = self._find_issue()
+            if actual is None or actual[0] != number or actual[1].get("body") != body or actual[1].get("state") != state:
+                raise PublisherError("simulation publication read-back missing or inconsistent")
             return SimulationResult(case, number, created, failures, tuple(observations))
 
 
@@ -3282,6 +3545,8 @@ def _cli() -> int:
                 finalizer_run_number=finalizer_number,
                 finalizer_run_attempt=finalizer_attempt,
                 finalizer_job=finalizer_job,
+                event_name=os.environ.get("GITHUB_EVENT_NAME"),
+                ref=os.environ.get("GITHUB_REF"),
             ),
         )
         result = publisher.reconcile_diagnostic_or_normal(
@@ -3308,7 +3573,7 @@ def _cli() -> int:
                     sort_keys=True,
                 )
             )
-        return 0
+        return 1 if any(result.status == "blocked" for result in results) else 0
     except PublisherError as exc:
         print(json.dumps({"status": "blocked", "category": exc.category, "error": str(exc)}), file=sys.stderr)
         return 1

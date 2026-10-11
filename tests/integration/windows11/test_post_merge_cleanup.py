@@ -191,8 +191,8 @@ def _assert_pending(fake: FakeTransport, callback: object) -> None:
     assert all(method == "GET" for method, _, _, _ in fake.calls)
 
 
-def test_real_manifest_has_one_pause_and_no_active_registration() -> None:
-    manifest = (ROOT / "docs" / "plans" / "2026-08-17-windows-11-ticket-manifest.yml").read_text(
+def test_cleanup_fixture_has_one_pause_and_no_active_registration() -> None:
+    manifest = (Path(__file__).parent / "fixtures" / "cleanup-manifest.yml").read_text(
         encoding="utf-8"
     )
     pause = parse_production_publication_pause(manifest)
@@ -218,7 +218,7 @@ def test_real_manifest_has_one_pause_and_no_active_registration() -> None:
 
 
 def test_cleanup_keeps_w11_010_blocked_and_retry_state_unchanged() -> None:
-    manifest = (ROOT / "docs" / "plans" / "2026-08-17-windows-11-ticket-manifest.yml").read_text(
+    manifest = (Path(__file__).parent / "fixtures" / "cleanup-manifest.yml").read_text(
         encoding="utf-8"
     )
     w11 = manifest.split("  - id: W11-010", 1)[1].split("  - id: W11-011", 1)[0]

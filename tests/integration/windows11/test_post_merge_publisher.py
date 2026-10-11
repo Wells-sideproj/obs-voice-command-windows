@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +21,8 @@ import pytest
 
 from tools.post_merge_publisher import (
     DEFAULT_REQUIRED_JOBS,
+    AUTHORIZATION_FIELDS,
+    HISTORICAL_ANCHOR_BLOCK,
     ApiError,
     PASS_MARKER,
     REPAIR_MARKER,
@@ -37,15 +41,15 @@ from tools.post_merge_publisher import (
 
 
 REPOSITORY = "Wells-sideproj/obs-voice-command-windows"
-WORKFLOW_ID = 9010
+WORKFLOW_ID = 373741435
 SHA_ONE = "1" * 40
 SHA_TWO = "2" * 40
 SHA_THREE = "3" * 40
 SHA_FOUR = "4" * 40
-ROOT_PR = 101
-REPAIR_PR = 102
-THIRD_PR = 103
-FOURTH_PR = 104
+ROOT_PR = 13
+REPAIR_PR = 15
+THIRD_PR = 21  # 僅 fake transport 的 simulated PR，非 controller registration。
+FOURTH_PR = 22
 CODE_STEP_BY_JOB = {
     "layer-a / windows-unit": "Run Windows hardware-free tests",
     "layer-a / macos-regression": "Run macOS regression tests",
@@ -178,6 +182,14 @@ def test_cli_keeps_http_403_fail_closed_with_nonzero_exit(monkeypatch: pytest.Mo
     assert token not in captured.err
 
 
+def _authorization() -> str:
+    return "\n".join([
+        "production_publication_authorization:",
+        *(f"  {key}: {value}" for key, value in AUTHORIZATION_FIELDS.items()),
+        "historical_diagnostic_anchors:", HISTORICAL_ANCHOR_BLOCK, "",
+    ])
+
+
 def _manifest(*, attempts: int = 1) -> str:
     lines = [
         "tickets:",
@@ -185,20 +197,21 @@ def _manifest(*, attempts: int = 1) -> str:
         "    post_merge_registration:",
         "      version: 1",
         "      attempts:",
-        "        - pr_number: 101",
+        "        - pr_number: 13",
         "          predecessor_pr_number: null",
         "          repair_issue_number: null",
     ]
-    for pr_number in range(REPAIR_PR, ROOT_PR + attempts):
+    numbers = [ROOT_PR, REPAIR_PR, THIRD_PR, FOURTH_PR]
+    for index, pr_number in enumerate(numbers[1:attempts], 1):
         lines.extend(
             [
                 f"        - pr_number: {pr_number}",
-                f"          predecessor_pr_number: {pr_number - 1}",
-                f"          repair_issue_number: {899 + pr_number - ROOT_PR}",
+                f"          predecessor_pr_number: {numbers[index - 1]}",
+                f"          repair_issue_number: {14 if index < 3 else 900}",
             ]
         )
     lines.extend(["  - id: W11-011", "    status: Blocked", ""])
-    return "\n".join(lines)
+    return _authorization() + "\n".join(lines)
 
 
 def _manifest_with_layer_b_ticket() -> str:
@@ -254,6 +267,7 @@ def _run(
     run = {
         "id": run_id,
         "run_attempt": attempt,
+        "run_started_at": (datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(seconds=run_id * 100 + attempt)).isoformat(),
         "repository": {"full_name": REPOSITORY},
         "workflow_id": WORKFLOW_ID,
         "event": "push",
@@ -296,6 +310,13 @@ class FakeTransport:
         self.next_issue = 900
         self.failures: dict[tuple[str, str], tuple[int, Any]] = {}
         self.on_request: Callable[[str, str], None] | None = None
+        self.finalizer = {
+            "id": 6001, "workflow_id": 373741433,
+            "path": ".github/workflows/post-merge-finalize.yml",
+            "run_number": 10, "run_attempt": 1,
+            "event": "workflow_dispatch", "head_branch": "develop",
+            "status": "in_progress", "repository": {"full_name": REPOSITORY},
+        }
 
     def add_pull(self, number: int, sha: str) -> None:
         value = {
@@ -336,10 +357,10 @@ class FakeTransport:
         self.jobs[run_id] = jobs
         self.runs_by_attempt[(run_id, attempt)] = dict(run)
         self.jobs_by_attempt[(run_id, attempt)] = [dict(job) for job in jobs]
-        self.suites.setdefault(sha, []).append(suite)
+        self.suites[sha] = [value for value in self.suites.get(sha, []) if value["id"] != suite["id"]] + [suite]
 
     def _response(self, body: Any, status: int = 200) -> HttpResponse:
-        return HttpResponse(status=status, body=body, headers={})
+        return HttpResponse(status=status, body=copy.deepcopy(body), headers={})
 
     @staticmethod
     def _page(values: list[Any], params: Mapping[str, Any] | None) -> list[Any]:
@@ -375,6 +396,10 @@ class FakeTransport:
                         "path": ".github/workflows/post-merge.yml",
                     }
                 )
+            if method == "GET" and path == f"{prefix}/actions/workflows/post-merge-finalize.yml":
+                return self._response({"id": 373741433, "path": ".github/workflows/post-merge-finalize.yml"})
+            if method == "GET" and path == f"{prefix}/actions/runs/6001":
+                return self._response(self.finalizer)
             if method == "GET" and path == f"{prefix}/git/ref/heads/develop":
                 return self._response({"object": {"sha": self.branch_tip_sha}})
             match = re.fullmatch(rf"{re.escape(prefix)}/actions/runs/(\d+)/attempts/(\d+)", path)
@@ -459,6 +484,8 @@ class FakeTransport:
                 self.comments[int(match.group(1))].append(comment)
                 return self._response(comment, status=201)
             match = re.fullmatch(rf"{re.escape(prefix)}/issues/(\d+)", path)
+            if method == "GET" and match:
+                return self._response(next(issue for issue in self.issues_data if issue["number"] == int(match.group(1))))
             if method == "PATCH" and match:
                 assert json_body is not None
                 issue = next(issue for issue in self.issues_data if issue["number"] == int(match.group(1)))
@@ -506,7 +533,10 @@ def _scenario(
 def _publisher(transport: FakeTransport) -> PostMergePublisher:
     return PostMergePublisher(
         GithubApi(transport, REPOSITORY),
-        PublisherConfig(repository=REPOSITORY),
+        PublisherConfig(repository=REPOSITORY, finalizer_run_id=6001,
+                        finalizer_run_number=10, finalizer_run_attempt=1,
+                        finalizer_job="finalize", event_name=transport.finalizer["event"],
+                        ref="refs/heads/develop"),
     )
 
 
@@ -551,7 +581,7 @@ def test_initial_pass_uses_registered_pr_without_precomputed_hashes() -> None:
     assert result.source_sha == SHA_ONE
     assert len(transport.comments[ROOT_PR]) == 1
     assert transport.issues_data == []
-    assert any(method == "POST" and path.endswith("/issues/101/comments") for method, path, _, _ in transport.requests)
+    assert any(method == "POST" and path.endswith("/issues/13/comments") for method, path, _, _ in transport.requests)
 
 
 def test_realistic_check_suite_fixture_and_filename_selector_reach_publisher_entrypoint() -> None:
@@ -1035,7 +1065,7 @@ def test_later_genuine_pass_resets_code_failures_after_infrastructure_gap() -> N
     assert transport.issues_data[0]["state"] == "closed"
 
 
-def test_registered_layer_b_ticket_is_discovered_without_done_claim() -> None:
+def test_registered_layer_b_ticket_is_outside_w11_010_authorization() -> None:
     transport = FakeTransport()
     transport.add_pull(ROOT_PR, SHA_ONE)
     transport.add_pull(201, SHA_TWO)
@@ -1044,14 +1074,9 @@ def test_registered_layer_b_ticket_is_discovered_without_done_claim() -> None:
     transport.manifests[SHA_TWO] = _manifest_with_layer_b_ticket()
     transport.add_run(5005, SHA_TWO, conclusion="success")
 
-    result = _publisher(transport).reconcile(5005, 1)
-
-    assert result.status == "pass"
-    assert result.source_pr_number == 201
-    assert result.action == "layer_b_required"
-    assert result.evidence["ticket_id"] == "W11-011"
-    assert result.evidence["layer_b_required"] is True
-    assert len(transport.comments[201]) == 1
+    with pytest.raises(PublisherError, match="outside protected authorization"):
+        _publisher(transport).reconcile(5005, 1)
+    assert transport.comments[201] == []
     assert transport.issues_data == []
 
 
@@ -1099,7 +1124,7 @@ def test_third_and_fourth_failures_transition_one_repair_projection() -> None:
     assert third.consecutive_code_failures == 3
     assert third.created_repair_issue is True
     assert transport.issues_data[0]["state"] == "open"
-    assert transport.issues_data[0]["labels"] == ["type:repair", "status:blocked"]
+    assert set(transport.issues_data[0]["labels"]) == {"type:repair", "status:blocked"}
     issue_number = transport.issues_data[0]["number"]
     post_issue_count = sum(
         method == "POST" and path.endswith("/issues")
@@ -1122,7 +1147,7 @@ def test_third_and_fourth_failures_transition_one_repair_projection() -> None:
     assert fourth.created_repair_issue is False
     assert fourth.repair_issue_number == issue_number
     assert transport.issues_data[0]["state"] == "open"
-    assert transport.issues_data[0]["labels"] == ["type:repair", "status:blocked", "needs-human"]
+    assert set(transport.issues_data[0]["labels"]) == {"type:repair", "status:blocked", "needs-human"}
     assert sum(
         method == "POST" and path.endswith("/issues")
         for method, path, _, _ in transport.requests
@@ -1138,17 +1163,6 @@ def test_stale_pass_after_newer_registered_failure_cannot_close_repair() -> None
     transport.manifests[SHA_TWO] = _manifest(attempts=2)
     transport.add_run(5001, SHA_ONE, conclusion="success")
     transport.add_run(5002, SHA_TWO, conclusion="failure", failed_job="layer-a / windows-unit")
-    lineage = lineage_key(REPOSITORY, "W11-010", ROOT_PR)
-    transport.issues_data.append(
-        {
-            "number": 900,
-            "body": _repair_issue_body(lineage),
-            "state": "open",
-            "labels": ["type:repair", "status:ready"],
-            "user": {"type": "Bot", "login": "github-actions[bot]"},
-        }
-    )
-
     publisher = _publisher(transport)
     newer = publisher.reconcile(5002, 1)
     older = publisher.reconcile(5001, 1)

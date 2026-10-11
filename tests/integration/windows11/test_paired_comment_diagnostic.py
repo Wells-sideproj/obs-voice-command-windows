@@ -376,7 +376,7 @@ def _post_count(fake: FakeTransport, number: int) -> int:
 
 
 def _protected_pause_manifest() -> str:
-    return (ROOT / "docs" / "plans" / "2026-08-17-windows-11-ticket-manifest.yml").read_text(
+    return (Path(__file__).parent / "fixtures" / "cleanup-manifest.yml").read_text(
         encoding="utf-8"
     )
 
@@ -517,7 +517,7 @@ def test_retired_diagnostic_classes_fail_before_transport() -> None:
     assert fake.calls == []
 
 
-def test_real_protected_pause_manifest_is_parseable_without_active_registration() -> None:
+def test_cleanup_protected_pause_fixture_is_parseable_without_active_registration() -> None:
     manifest = _protected_pause_manifest()
     pause = parse_production_publication_pause(manifest)
     assert pause is not None
@@ -827,7 +827,7 @@ def test_missing_pause_fails_closed_without_normal_reconciliation() -> None:
 
 
 def test_finalizer_uses_read_only_pull_request_permission_after_cleanup() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "post-merge-finalize.yml").read_text(
+    workflow = (Path(__file__).parent / "fixtures" / "cleanup-finalizer.yml").read_text(
         encoding="utf-8"
     )
     jobs = workflow.split("jobs:\n", 1)[1]

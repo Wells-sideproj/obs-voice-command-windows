@@ -43,7 +43,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-      pull-requests: read
+      pull-requests: write
       issues: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Reconcile production evidence（pending-authorization、zero production POST/PATCH/DELETE）
+      - name: 依 protected authorization 重建 production evidence
         if: ${{ github.event_name == 'workflow_run' || inputs.simulation_case == '' || inputs.simulation_case == 'none' }}
         run: python tools/post_merge_publisher.py --diagnostic-aware
 
