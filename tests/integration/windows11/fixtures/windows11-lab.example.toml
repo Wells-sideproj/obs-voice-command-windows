@@ -1,0 +1,29 @@
+# Non-secret template only.  Replace every path with an existing path on the
+# dedicated Windows 11 lab host; do not add a password, token, PAT, or cookie.
+schema_version = 1
+
+[lab]
+lab_root = "C:/w11-obs-lab"
+
+[obs]
+executable = "C:/w11-obs-lab/obs/bin/64bit/obs64.exe"
+portable = true
+profile = "w11-011-certification"
+collection = "w11-011-certification"
+host = "127.0.0.1"
+port = 4455
+scene = "W11-011 Test Scene"
+source = "W11-011 Display Capture"
+
+[runtime]
+python_path = "C:/w11-obs-lab/runtime/python312/python.exe"
+uv_path = "C:/w11-obs-lab/runtime/uv/uv.exe"
+uv_version = "0.11.8"
+project_venv = "C:/w11-obs-lab/runtime/project-venv"
+cache_dir = "C:/w11-obs-lab/runtime/uv-cache"
+lockfile = "C:/checked-out/obs_voice_command/uv.lock"
+
+[zoom]
+level = 2.0
+deadzone = 0.15
+smoothing = 0.12

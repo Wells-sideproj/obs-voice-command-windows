@@ -74,7 +74,9 @@ The manifest assigns one completion profile per ticket:
 
 - `layer_a_post_merge`: W11-001 through W11-009 require pre-merge `required / gate`, GitHub's protected merge-queue squash of the exact head SHA, and a distinct trusted `ci.yml` push run that succeeds on the exact merged `develop` SHA.
 - `layer_a_post_merge_automated`: W11-010 requires the same evidence, but its authoritative post-merge provider is the newly merged `post-merge.yml` automation.
-- `layer_a_plus_layer_b_exact_sha`: W11-011 and W11-012 require authoritative post-merge Layer A plus `windows11-integration / obs-e2e` success and cleanup success on the same exact merged SHA. W11-012 also requires release-readiness evidence.
+- `layer_a_plus_layer_b_exact_sha`: W11-011, W11-012, and deferred W11-013 require authoritative post-merge Layer A plus `windows11-integration / obs-e2e` success and cleanup success on the same exact merged SHA. Release-candidate additions apply only when `release_readiness_required=true` (W11-012).
+
+2026-10-15 使用者批准當期 `windows11_single_monitor_mvp`：W11-011 做單螢幕 activation/certification、W11-012 做單螢幕 release；W11-013 另案延後多螢幕／mixed-DPI／負座標／跨螢幕 freeze 實機認證。Mandatory set 為 W11-001～012（含 W11-011-PREP），不含 W11-013；release 票需其他 mandatory tickets Done 加自身 AC/profile 齊備，不把自身 Done 當前置。多螢幕缺證不阻擋本期，任何單螢幕、安全、cleanup 或共用 regression 缺陷仍阻擋。功能與 mock regression 保留，文件不得把延期寫成 PASS。
 
 Layer A always gates protected merge-queue execution. The pre-queue exact-head
 GitHub auto-merge path is superseded after queue activation and is valid only as
@@ -168,6 +170,20 @@ active merge-queue contract.
 
 ## 4. Layer B — real Windows 11 OBS integration
 
+### W11-011-PREP：離線安全準備
+
+依已記錄的 Astra 仲裁，W11-011-PREP 只依賴 Done W11-010，實作 portable OBS／隔離 runtime／fixture／SHA 與授權檢查／完整 cleanup 的 hardware-free 準備。它不新增 push trigger、不啟動 runner/OBS、不下載安裝 runtime、不建 secrets；只使用 group `w11-obs-integration` 與既有 labels。
+
+2026-10-14 follow-up 仲裁將 PREP 明確收斂為硬停用：self-hosted integration job 固定 `if: ${{ false }}`，只保留停用說明；hosted job 回報 `PREP_DISABLED/not_certified`。移除 caller 自填批准／runtime 路徑與秘密引用。Live CLI、公開 live wrapper 與實際 spawn adapter 無環境或參數可解鎖，任何資源／秘密讀取前回報 `PREP_LIVE_DISABLED`；只以純函式及明確注入 fake 的 lifecycle seam 驗證。Fixture 驗證標記 `structural_valid`、`runtime_verified=false`，不執行其指定程式。Portable argv 的 cwd 為 executable.parent，不是 lab root。Skipped Layer B、workflow 成功、fake PASS 均不是認證證據。
+
+實際 runtime/venv/cache、`uv sync --frozen`、ACL、fresh runner policy/membership 與授權來源驗證留給 W11-011 啟用。Exact certification SHA S 產生後，由 controller 依既有 setup approval 與 lab readiness 在受管理、caller 無法改寫的紀錄綁定 repo/ticket/workflow revision/S/授權來源/撤銷狀態；不可把未知 S 寫入其自身 commit，亦不可用 dispatch input 自證批准。未來 hosted preflight 與 side effect 前須重新核對可信紀錄、event/workflow/checkout/protected tip，漂移即拒絕；PREP 不建立該外部設定。
+
+使用者僅有單螢幕，不阻擋本票離線交付。2026-10-15 新授權與仲裁將多螢幕實機認證移至 W11-013；W11-011/012 以實際現有 DPI／解析度的單螢幕配置認證，不自動改顯示設定。Exact-SHA Layer A／B、cleanup 與其餘適用 AC 不減少。
+
+本票沿用 `layer_a_post_merge`：controller 驗證 exact PR/merge-group required gate、GitHub protected squash、同 merged SHA 的 trusted `ci.yml` push 與 `post-merge.yml` producer 成功後才可 Done。不加入 W11-010/root13 publisher registration，也不擴張其 mutation 授權。W11-011 另依賴本票，保留實機全部 AC/profile；live 啟用前再次查核 group/repository/workflow/membership，並待硬體與精確 certification SHA 證據齊備。
+
+上述 AC 以2026-10-15單螢幕範圍更新為準。PREP Done 後，W11-011 序列化接手原七檔作安全 activation（含對應拒絕/合法授權測試）及 evidence docs；不另建 activation 前置票。最終 S 尚不存在不阻擋 code PR，controller 在 protected merge 產生 S 後才綁定可信授權；授權未齊時 hosted preflight 拒絕 live，齊備後可 exact-commit dispatch。不得只刪 PREP guard/tests 或使用 caller approved 字串解鎖。
+
 ### Trigger and runner
 
 - W11-010 實作 inactive reusable/manual workflow、harness、cleanup 與 repair behavior，但不在每次 `develop` push 啟動 live OBS；該 workflow 沒有 `push`、pull-request 或 merge-group trigger。
@@ -212,7 +228,7 @@ flowchart TD
 - Snapshot the original transform before mutation.
 - After zoom-in, poll with a bounded timeout and verify scale and position changed to the expected zoom state.
 - After zoom-out, verify position error is at most 0.5 px and scale error is at most `1e-4` from baseline.
-- Include a selected-monitor assertion when the self-hosted runner has the declared multi-monitor fixture.
+- W11-011/012 validate the declared single capture monitor at the recorded existing DPI/resolution. W11-013 owns real multi-monitor selected-monitor/freeze assertions; skipped or missing fixture evidence is never a multi-monitor PASS.
 - On any exception or timeout, run cleanup and report both the primary failure and any cleanup failure.
 - The Layer B check name is `windows11-integration / obs-e2e`.
 - W11-001 through W11-010 must not start dedicated OBS as a completion gate. Their real-OBS probe result may be absent, `MISSING_OBS`, or `UNREACHABLE_ENDPOINT` without consuming retry budget.
@@ -265,5 +281,6 @@ After third-failure arbitration, the arbitrator records one of: targeted repair 
 - W11-002 activates the full cross-platform CI mode and lock; W11-005 hardens Layer A and its stable aggregate required check.
 - W11-009 audits and hardens branch protection, required checks, merge queue/auto-merge, and PR policy after the bootstrap.
 - W11-010 implements authoritative post-merge Layer A, the inactive Layer B workflow/harness, Repair Ticket creation, deduplication, and retry enforcement.
-- W11-011 activates Layer B on trusted certification pushes and records the real Windows 11 evidence.
-- W11-012 validates both exact-SHA layers again for the release candidate; tag and GitHub Release publication remain separately approval-gated.
+- W11-011 activates trusted Layer B and records single-monitor Windows 11 certification, retaining actual OBS/voice/latency/device/cache/cleanup evidence requirements.
+- W11-012 validates both exact-SHA layers again for the single-monitor release candidate; tag and GitHub Release publication remain separately approval-gated.
+- W11-013 owns deferred multi-monitor/mixed-DPI/negative-coordinate real-machine certification. It depends on W11-011, not vice versa, and does not block W11-012 merely for the explicitly deferred hardware evidence.

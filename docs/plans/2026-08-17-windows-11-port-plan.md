@@ -1,7 +1,7 @@
 # Windows 11 移植：高階規劃與 Ticket DAG
 
 - 日期：2026-08-17
-- 狀態：Repository transferred to Wells-sideproj；GitHub policy evidence verified；local origin URL update pending platform ACL；W11-005 remains paused pending merge-queue arbitration
+- 狀態（2026-10-15 controller 更新）：W11-001～W11-010 已完成；W11-011-PREP 離線準備 Doing；當期改為單螢幕 MVP，W11-011/012 尚待準備與實機證據，多螢幕另列 W11-013 延後。
 - 目標分支：`develop`
 - 基準 commit：`de6c588f981596ed13bc9cd0254ad4989a2686b3`
 - Windows origin：`https://github.com/Wells-sideproj/obs-voice-command-windows.git`（public、GitHub Free Organization、`develop` 為 default branch）
@@ -18,7 +18,7 @@
 
 1. Windows 11 x64、Python 3.12、OBS 28+／obs-websocket 5.x。
 2. OBS transform 模式：`zoom_in`、`zoom_out`、平滑、deadzone、斷線恢復及退出復原。
-3. 單螢幕與多螢幕；支援負座標排列及 mixed-DPI。
+3. 當期認證為單螢幕、現有解析度與 DPI。保留多螢幕／負座標／mixed-DPI 實作與 mock regression；其真機認證另列 W11-013，不宣稱已通過。
 4. Windows 麥克風、ASR 模型下載／快取、`--list-devices`、`--dry-run`。
 5. macOS regression protection。
 6. PR CI、required checks、auto-merge、develop post-merge CI，以及失敗時建立 Repair Ticket。
@@ -109,20 +109,20 @@ Windows 實作優先使用標準庫 `ctypes` 呼叫 `SetProcessDpiAwarenessConte
 
 ## 4. Windows 11 移植完成條件（Definition of Done）
 
-全部條件均須成立：
+當期 `windows11_single_monitor_mvp` 的全部適用條件均須成立；2026-10-15 使用者批准多螢幕實機認證另案延後，完整裁決見 `windows-11-offline-prep-2026-10-14.md`。
 
 1. 從乾淨 clone 以文件化 PowerShell 指令建立 project-local 環境；`uv sync --frozen` 在 Windows 11 與 macOS CI 都成功。
 2. Windows 安裝不解析或安裝 `pyobjc-framework-Quartz`；macOS 仍安裝並使用 Quartz。
 3. Windows 可執行 `--help`、`--list-devices`、`--dry-run` 與預設 OBS mode，且 import 階段沒有 Quartz／macOS command error。
 4. `--os` 在 Windows 於任何模型下載、麥克風或 OBS side effect 前，以明確 unsupported 訊息結束。
-5. Windows 單螢幕、負座標多螢幕、100%／125%／150%／200% mixed-DPI 坐標測試通過。
-6. 選定的 OBS source 是 Windows `monitor_capture` 時，可從 source settings 的 `monitor_id` 對應至 Win32 display；游標移到非擷取螢幕不改變 zoom center。
+5. Windows 真實單螢幕在記錄的現有解析度、physical rectangle 與 DPI 完成座標測試；不自動改顯示設定或宣稱未測 DPI。多螢幕負座標及100%／125%／150%／200%跨DPI真機矩陣由 W11-013 驗證，既有 mock tests 保留。
+6. Windows `monitor_capture` 的 `monitor_id` 正確對應 Win32 display，單一擷取螢幕上的游標追蹤與 zoom center 通過；跨螢幕 freeze 實機證據移交 W11-013，功能及回歸測試不刪除。
 7. scene 中有多個候選顯示器來源且未設定 `source` 時，程式拒絕猜測並列出可設定的來源名稱。
 8. 不支援的 crop／rotation／非鋪滿 transform 在啟動時 fail fast；支援的來源在 zoom out、Ctrl-C、OBS reconnect 後精確復原原始 transform。
 9. 既有 matcher、zoom、config 與 macOS pointer tests 全數通過；新增 Windows backend、ObsClient contract、controller lifecycle 與 hardware-free pipeline tests。
 10. PR 的 `required / gate` 必須在 protected `merge_group` 上成功後，GitHub 才可執行 queue 的 squash merge；workflow 同時支援 `pull_request` 與 `merge_group`。Queue 啟用前的 exact-head auto-merge 僅是 legacy fallback。
-11. Ticket 依 manifest 的 `completion_profile` 由 Merged 轉 Done；所有 profile 都要求 exact merged SHA 的 trusted post-merge Layer A，只有 W11-011／W11-012 另要求同 SHA Layer B。失敗時建立去重的 Repair Ticket，附 commit、workflow run 和失敗 check。
-12. Windows 11 實機 E2E evidence 完成，README 有完整安裝、OBS 設定、麥克風權限、多螢幕限制與 troubleshooting。
+11. Ticket 依 manifest 的 `completion_profile` 由 Merged 轉 Done；所有 profile 都要求 exact merged SHA 的 trusted post-merge Layer A，W11-011／W11-012／後續 W11-013 另要求同 SHA Layer B。失敗時建立去重 Repair Ticket，附 commit、workflow run 和失敗 check。
+12. 當期單螢幕實機 E2E evidence 完成，README 有安裝、OBS、麥克風權限、實測 DPI／解析度與 troubleshooting；只有證據齊備才稱 single-monitor certified，多螢幕明示 unverified 並追蹤 W11-013。
 
 ## 5. Epic 拆分
 
@@ -132,7 +132,7 @@ Windows 實作優先使用標準庫 `ctypes` 呼叫 `SetProcessDpiAwarenessConte
 | E1 Platform foundation | 切開平台 import、相依與 coordinate boundary | W11-002、W11-003 |
 | E2 Runtime portability | 建立可測 composition、CLI capability 與 ASR guard | W11-004 |
 | E3 OBS correctness | 正確找出 Windows display capture 與擷取螢幕 | W11-006 |
-| E4 Verification | lock、cross-platform CI、component tests、實機認證 | W11-005、W11-007、W11-011 |
+| E4 Verification | lock、cross-platform CI、component tests、實機認證 | W11-005、W11-007、W11-011、W11-013（延後） |
 | E5 Delivery UX | Windows 文件與安全的設定流程 | W11-008 |
 | E6 Orchestration | tracker、PR gate、auto-merge、post-merge repair loop | W11-009、W11-010 |
 | E7 Release | 版本、乾淨安裝驗證與 handoff | W11-012 |
@@ -154,8 +154,11 @@ flowchart TD
     T7 --> T10["W11-010 Authoritative post-merge + inactive Layer B"]
     T8 --> T10
     T9 --> T10
-    T10 --> T11["W11-011 Activate Layer B + Windows 11 certification"]
-    T11 --> T12["W11-012 Release + final handoff"]
+    T10 --> PREP["W11-011-PREP Offline lab safety preparation"]
+    PREP --> T11["W11-011 Activate Layer B + single-monitor certification"]
+    T10 --> T11
+    T11 --> T12["W11-012 Single-monitor release + handoff"]
+    T11 --> T13["W11-013 Deferred multi-monitor certification"]
 ```
 
 可平行區段：
@@ -410,28 +413,32 @@ Acceptance criteria：
 
 Tests/evidence：三階段不得互相替代：(1) fake transport、workflow/parity、routing 與 required CI；(2) 新 production PR protected queue 合併後，其 actual merged SHA 的完整 producer PASS、successful finalizer、production comment／repair read-back；(3) protected develop 獨立 manual live PASS／FAIL／rerun simulation，同一 simulation issue、rerun count 不增且 production state 不變。Cleanup run #6、其 SHA 的 producer PASS、歷史 diagnostic 或 local tests 都不能替代第(2)(3)階段。原 cleanup／legacy 正負測試保留於隔離 fixture；三階段全齊才由 controller 標 Done，無 real OBS/LayerB activation。
 
-### W11-011 — Windows 11 實機 E2E certification
+### W11-011 — Windows 11 單螢幕 activation 與實機 certification
+
+前置準備子票 `W11-011-PREP` 依已記錄仲裁建立；只依賴 W11-010 Done、以 Layer A post-merge 完成，不得啟用 real OBS 或 runner。W11-011 依賴 W11-010 與 PREP；2026-10-15 使用者批准單螢幕優先，AC4／7 調整如下，其餘安全與驗證強度不變。完整裁決及群組 read-back 見 `docs/validation/windows-11-offline-prep-2026-10-14.md`。
+
+PREP 合併後仍硬停用 self-hosted job 與 live CLI/adapter。W11-011 接手其最終受保護版本的七檔 activation 與實機證據；實際 runtime/ACL/provisioning、policy/membership 與可信 exact-SHA authorization 仍須驗證。Code PR 不要求未知的 final SHA 事先存在：合併產生 S 後由 controller 綁定可信可撤銷授權，缺授權的 hosted preflight 必須拒絕 live，完成後可 authorized exact-commit dispatch。多螢幕缺證只阻擋後續 W11-013，不再阻擋本票單螢幕 Done。
 
 - 初始狀態：Blocked
-- Depends on：W11-010
+- Depends on：W11-010、W11-011-PREP
 - Completion profile：`layer_a_plus_layer_b_exact_sha`；CI stage：`layer_b_activation`
-- 建議 touch set：`docs/validation/windows-11-e2e-<date>.md`、`.github/workflows/windows11-integration.yml`
-- 目標：在真實 Windows 11 + OBS + mic 上證明 Definition of Done。
+- Touch set：manifest 明列 PREP 原七檔及 `docs/validation/windows-11-e2e-*.md`；只作必要 activation／非秘密 fixture 更新，不擴張產品 backend 或 publisher。
+- 目標：在真實 Windows 11 + OBS + mic 的現有單螢幕配置證明當期 Definition of Done。
 
 Acceptance criteria：
 
 1. 只在 trusted `push`／authorized exact-commit dispatch 啟用 Layer B；同一 exact merged SHA 的 authoritative Layer A、`windows11-integration / obs-e2e` 與 cleanup 都必須 success。
 2. 啟動 dedicated test OBS、等待 `127.0.0.1:4455`，讀取並保存已遮蔽的 `GetSceneItemList`、`GetInputSettings`、`monitor_id` 與 baseline transform evidence。
 3. 記錄硬體、Windows build、OBS／obs-websocket、Python、uv、麥克風、monitor layout、DPI 與 source transform。
-4. 單螢幕與至少一組雙螢幕 mixed-DPI；包含左側或上方負座標排列。
+4. 記錄實際單螢幕 display count、解析度、physical-pixel rectangle、現有 DPI／縮放、monitor identity 與 OBS capture mapping；在此配置完成實測，不宣稱未測 DPI，不自動改縮放／解析度／layout。
 5. 每個預設正向 phrase 10 次皆觸發；至少 10 個負向 utterances 為 0 false trigger。
 6. 10 次中至少 9 次在 phrase 結束後 1.5 秒內開始 transform；記錄測量方法，不憑感覺填寫。
-7. 游標在 capture monitor 時追蹤；移到其他 monitor 時 center 不跳動。
+7. 在單一 capture monitor 驗證游標追蹤、zoom center 與 production command-to-transform；跨螢幕 freeze 真機認證由 W11-013 負責並標 unverified/deferred。
 8. zoom out、Ctrl-C、OBS reconnect 後 position 誤差 ≤ 0.5 px、scale 誤差 ≤ 1e-4。
 9. `--list-devices`、named device、`--dry-run`、首次模型下載與第二次 cache hit 皆驗證。
 10. 測試不自動重開機，不改 driver、BIOS、全域 PATH 或共用 runtime。
 
-### W11-012 — Release、版本與最終 handoff
+### W11-012 — 單螢幕 Release、版本與最終 handoff
 
 - 初始狀態：Blocked
 - Depends on：W11-011
@@ -444,8 +451,18 @@ Acceptance criteria：
 1. 版本由 0.2.1 升至 0.3.0，description 不再宣稱 macOS-only，support matrix 明確。
 2. 乾淨 clone 在 Windows/macOS 使用 lock file 安裝、build、unit/component tests 成功。
 3. release notes 列出 Windows support、`--os` 邊界、已知限制、升級與 rollback。
-4. 所有 W11 tickets Done，沒有 open blocker；Repair Tickets 已 Done 或明確阻擋 release。
+4. manifest `release_scope.mandatory_tickets` 除本票外全部 Done，本票其餘 AC／exact-SHA profile 齊備才可 Done；整體 MVP 完成才要求 mandatory set 全部 Done。W11-013 不作前置，但任何影響單螢幕功能、安全、cleanup 或共用 regression 的未解 Repair Ticket 仍阻擋 release，即使發現於延後票。
 5. tag／GitHub Release 是外部寫入，須取得使用者明確批准後才執行。
+6. release candidate 自身 exact SHA 重新取得 Layer A／真實 Layer B／cleanup，不能借舊 W11-011 SHA。README/release notes 證據未齊寫 pending certification，齊備才明示 single-monitor certified 及實測 DPI/解析度；multi-monitor unverified 追蹤 W11-013，不移除功能。
+
+### W11-013 — 延後的多螢幕／mixed-DPI／負座標實機認證
+
+- 狀態：Blocked（使用者明確延期、缺多螢幕 fixture 與 live readiness）；不新增 Deferred 狀態 enum。
+- Depends on：W11-011；不被 W11-012 依賴，不屬當期單螢幕 MVP mandatory set。
+- Completion profile：`layer_a_plus_layer_b_exact_sha`；CI stage：`layer_b_certification`。
+- Touch set：`docs/validation/windows-11-multimonitor-*.md`、`docs/windows/**`。沿用已啟用 harness；發現程式問題須先仲裁具體修復 touch_set。
+- Acceptance：至少一組真實雙螢幕 mixed-DPI、左側或上方負座標；100/125/150/200% 跨 DPI 真機矩陣逐項記錄；monitor_id mapping、擷取追蹤、非擷取螢幕 freeze、返回後追蹤及 zoom out/Ctrl-C/reconnect restore（position≤0.5px、scale≤1e-4）。同 SHA Layer A／真實 Layer B／cleanup 必須成功。
+- 未執行不 PASS；mock、單螢幕縮放或虛擬顯示不替代雙螢幕證據。新硬體/設定變更依批准邊界驗證，本裁決不授權自動變更顯示或 driver。
 
 ## 8. Test strategy
 
@@ -463,8 +480,8 @@ Acceptance criteria：
 
 1. ASR model download/cache smoke：manual 或 scheduled，避免每個 PR 下載大型模型。
 2. 真麥克風與 Windows privacy permission。
-3. 真 OBS WebSocket 與 display capture；只在 W11-011／W11-012 的 Layer B completion profile 成為 required evidence。
-4. Mixed-DPI、多螢幕及負座標。
+3. 真 OBS WebSocket 與 display capture；W11-011／W11-012 及後續 W11-013 的 Layer B completion profile 要求 exact-SHA evidence。
+4. Mixed-DPI、多螢幕及負座標真機測試延後至 W11-013；既有 hardware-free/mock 矩陣仍 required。
 5. 語音準確率與 command-to-transform latency。
 
 ### Regression policy

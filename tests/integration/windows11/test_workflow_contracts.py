@@ -62,7 +62,7 @@ def test_finalizer_has_only_the_arbitrated_mutation_permissions() -> None:
     assert "persist-credentials: false" in workflow
 
 
-def test_layer_b_workflow_is_inactive_until_manual_or_reusable_authorized_call() -> None:
+def test_layer_b_workflow_is_hard_disabled_during_offline_preparation() -> None:
     workflow = LAYER_B.read_text(encoding="utf-8")
     header = _header(LAYER_B)
     assert "workflow_dispatch:" in header
@@ -71,15 +71,28 @@ def test_layer_b_workflow_is_inactive_until_manual_or_reusable_authorized_call()
     assert "pull_request:" not in header
     assert "merge_group:" not in header
     assert "permissions: {}" in header
-    assert "group: w11-010-obs-integration" in header
+    assert "group: w11-obs-integration" in header
     assert "cancel-in-progress: false" in header
     assert "self-hosted, Windows, X64, obs-integration" in workflow
     assert "name: windows11-integration / obs-e2e" in workflow
-    assert "needs: preflight" in workflow
-    assert "protected_sha" in workflow
-    assert "W11_010_HARDWARE_AUTHORIZATION" in workflow
-    assert "tools/windows11_integration_harness.py" in workflow
-    assert "--host" not in workflow
+    assert "if: ${{ false }}" in workflow
+    assert "PREP_DISABLED" in workflow
+    assert "not_certified" in workflow
+    for forbidden in (
+        "authorized_sha",
+        "workflow_sha",
+        "python_path",
+        "uv_path",
+        "OBS_WEBSOCKET_PASSWORD",
+        "W11_011_HARDWARE_AUTHORIZATION",
+        "protected_sha",
+        "tools/windows11_integration_harness.py",
+        "actions/checkout",
+        "needs:",
+        "secrets.",
+        "inputs.",
+    ):
+        assert forbidden not in workflow
 
 
 def test_repair_form_captures_controller_evidence_without_secrets() -> None:

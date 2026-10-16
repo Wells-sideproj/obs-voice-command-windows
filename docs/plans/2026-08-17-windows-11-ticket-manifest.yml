@@ -6,6 +6,15 @@ baseline_commit: de6c588f981596ed13bc9cd0254ad4989a2686b3
 target_branch: develop
 branch_prefix: codex/
 initial_ticket: W11-001
+release_scope:
+  id: windows11_single_monitor_mvp
+  approved_on: "2026-10-15"
+  approval_basis: "使用者：先完成單螢幕版本，多螢幕認證另案延後"
+  mandatory_tickets: [W11-001, W11-002, W11-003, W11-004, W11-005, W11-006, W11-007, W11-008, W11-009, W11-010, W11-011-PREP, W11-011, W11-012]
+  deferred_tickets: [W11-013]
+  release_ticket_predecessors: mandatory_tickets_excluding_self
+  deferred_evidence_does_not_block_current_release: true
+  current_scope_safety_cleanup_and_shared_regression_repairs_still_block: true
 repository_topology:
   origin:
     url: https://github.com/Wells-sideproj/obs-voice-command-windows.git
@@ -43,6 +52,19 @@ repository_topology:
     pinned_baseline: de6c588f981596ed13bc9cd0254ad4989a2686b3
   local_remote_names_verified: true
 plan_arbitrations:
+  - id: PLAN-W11-SINGLE-MONITOR-MVP-2026-10-15
+    state: resolved
+    decision: dependency_dag_change
+    route: windows_arbitrator
+    model: gpt-6-astra
+    model_reasoning_effort: medium
+    agent_id: 01a1402c-70df-7862-8598-6ae30c3691ea
+    identity_evidence: fresh_named_spawn_fixed_model_and_effort
+    approval_basis: "使用者：先完成單螢幕版本，多螢幕認證另案延後；不自動變更現有顯示設定"
+    human_input_required: false
+    consume_code_retry_budget: false
+    confidence: high
+    evidence: docs/validation/windows-11-offline-prep-2026-10-14.md
   - id: PLAN-W11-EMPTY-ORIGIN-BOOTSTRAP
     state: resolved
     decision: dependency_dag_change
@@ -264,7 +286,7 @@ external_predecessor_gates:
       unexpected_remote_state_needs_human: no_automatic_force_rewrite_delete_or_recreate
 completion_profiles:
   layer_a_post_merge:
-    applies_to: [W11-001, W11-002, W11-003, W11-004, W11-005, W11-006, W11-007, W11-008, W11-009]
+    applies_to: [W11-001, W11-002, W11-003, W11-004, W11-005, W11-006, W11-007, W11-008, W11-009, W11-011-PREP]
     pre_merge_requires:
       - active_zero_bypass_pull_request_rule
       - zero_required_human_reviews_for_unattended
@@ -293,12 +315,13 @@ completion_profiles:
       - repair_deduplication_active
     provider: .github/workflows/post-merge.yml
   layer_a_plus_layer_b_exact_sha:
-    applies_to: [W11-011, W11-012]
+    applies_to: [W11-011, W11-012, W11-013]
     done_requires:
       - trusted_post_merge_layer_a_success
       - windows11_integration_obs_e2e_success
       - baseline_transform_cleanup_success
       - both_layers_match_exact_merged_develop_sha
+    release_candidate_additions_apply_when: release_readiness_required_true
     release_candidate_additions:
       - all_predecessor_tickets_done
       - no_unresolved_blocking_repair_ticket
@@ -1122,7 +1145,9 @@ tickets:
   - id: W11-010
     epic: E6
     title: Authoritative post-merge Layer A, inactive Layer B harness, and Repair Ticket loop
-    status: PR
+    status: Done
+    completion_evidence: docs/validation/w11-010-production-delivery.md
+    completion_sha: b4ae89923f2a55c9e132f584d0ce4cb2e7b50580
     completion_profile: layer_a_post_merge_automated
     ci_stage: post_merge_automation
     post_merge_registration:
@@ -1138,11 +1163,49 @@ tickets:
           predecessor_pr_number: 15
           repair_issue_number: 14
     production_activation:
-      state: PR
+      state: Done
       pr_number: 21
       pr_url: https://github.com/Wells-sideproj/obs-voice-command-windows/pull/21
+      merged_sha: b4ae89923f2a55c9e132f584d0ce4cb2e7b50580
+      merged_at: "2026-10-11T14:38:27Z"
+      pr_head_sha: cb15c1a67a42e5678e93618003bc7b71e710bf83
+      pre_merge_ci_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/38147758797
+      merge_group_ci_run: https://github.com/Wells-sideproj/obs-voice-command-windows/actions/runs/38147934656
       historical_diagnostic_anchor: 14
       production_repair_issue_number: null
+      producer_run_id: 38148005163
+      push_ci_run_id: 38148005235
+      finalizer_run_id: 38148049383
+      finalizer_conclusion: success
+      production_comment_id: 6110174213
+      production_completion_eligible: true
+    simulation_acceptance:
+      state: passed
+      issue_number: 22
+      failed_run_id: 38148400151
+      failure_class: unresolved_simulation_readback
+      confirmed_infrastructure: false
+      code_retry_consumed: false
+      arbitration_state: resolved
+      arbitration_route: windows_arbitrator
+      arbitration_model: gpt-6-astra
+      arbitration_effort: medium
+      arbitration_evidence: docs/validation/w11-010-simulation-readback-arbitration.json
+      infrastructure_allowance_limit: 2
+      infrastructure_revalidations_used: 1
+      revalidation_run_id: 38149173213
+      revalidation_maximum_dispatches: 1
+      pass_run_id: 38149173213
+      fail_run_id: 38149259346
+      rerun_run_id: 38331190028
+      all_runs_conclusion: success
+      final_observations: [pass, fail, rerun]
+      simulated_failure_count_after_fail: 1
+      simulated_failure_count_after_rerun: 1
+      unique_issue_confirmed: true
+      production_unchanged: true
+      original_failure_root_cause: unresolved
+      evidence: docs/validation/w11-010-live-simulation.md
     diagnostic_repair:
       state: PR
       issue_number: 14
@@ -1218,17 +1281,54 @@ tickets:
       - docs/plans/2026-08-17-windows-11-ticket-manifest.yml
       - docs/validation/w11-010-*.md
       - docs/validation/w11-010-*.json
-  - id: W11-011
+  - id: W11-011-PREP
     epic: E4
-    title: Windows 11 real-machine E2E certification
-    status: Blocked
-    blocked_reason: dependency_blocked_by_W11-010
-    completion_profile: layer_a_plus_layer_b_exact_sha
-    ci_stage: layer_b_activation
+    title: Windows 11 實機認證前的離線安全準備
+    status: Doing
+    blocked_reason: null
+    routing_state: ready
+    worker:
+      route: windows_worker
+      model: gpt-5.6-luna
+      model_reasoning_effort: max
+      agent_id: 01a142a2-6247-73e3-bf57-7ac1669d56d8
+      previous_review_agent_id: 01a14029-f948-7692-8837-cc0b95d12207
+      redispatch_reason: previous_agent_not_found_2026_10_16
+      previous_agent_id: 01a13614-1dd9-79f0-835f-38dda9c1f987
+      previous_quota_interrupted_agent_id: 01a137d8-835d-74b2-945f-662fd0a4b480
+      dispatched_on: "2026-10-16"
+      route_identity_evidence: fresh_named_windows_worker_spawn_fixed_model_and_effort
+      branch: codex/w11-011-offline-prep
+      base_sha: b4ae89923f2a55c9e132f584d0ce4cb2e7b50580
+      claim_verified: true
+    depends_on: [W11-010]
+    completion_profile: layer_a_post_merge
+    ci_stage: full
+    additional_done_requires: [trusted_post_merge_layer_a_success_on_exact_merged_sha]
+    execution:
+      worker_profile: implementer
+      arbitration_profile: arbitrator
+      escalation_threshold: low
     arbitration:
-      state: none
-      reason: null
-      decision: null
+      state: resolved
+      decision: targeted_repair
+      reason: prep_hard_disabled_activation_and_pure_fake_contracts
+      execution_identity_revalidation: verified_fresh_named_arbitrator_spawn
+      revalidation_agent_id: 01a137d5-8469-7990-92b3-6c532cebf656
+      worker_resume_model_drift: rejected_no_implementation
+      historical_decision: needs_human
+      historical_evidence: docs/validation/windows-11-e2e-2026-10-13-arbitration.md
+      follow_up_state: resolved
+      follow_up_question: prep_fail_closed_activation_and_trusted_exact_sha_authorization
+      offline_preparation_permitted: true
+      live_activation_still_requires_human: true
+      route: windows_arbitrator
+      model: gpt-6-astra
+      model_reasoning_effort: medium
+      agent_id: 01a132da-4844-7120-9200-1ffc3a38ba7c
+      evidence: docs/validation/windows-11-offline-prep-2026-10-14.md
+      human_input_required: false
+      confidence: high
     retry:
       state: none
       consecutive_code_failures: 0
@@ -1236,20 +1336,138 @@ tickets:
       repair_ticket: null
       last_failed_layer: null
       last_failed_run: null
-    depends_on: [W11-010]
+    touch_set:
+      - .github/workflows/windows11-integration.yml
+      - tools/windows11_integration_harness.py
+      - tools/windows11_lab.py
+      - tests/integration/windows11/test_layer_b_harness.py
+      - tests/integration/windows11/test_workflow_contracts.py
+      - tests/integration/windows11/test_windows11_lab.py
+      - tests/integration/windows11/fixtures/windows11-lab.example.toml
+    controller_touch_set:
+      - AGENTS.md
+      - docs/plans/2026-08-17-windows-11-ticket-manifest.yml
+      - docs/plans/2026-08-17-windows-11-port-plan.md
+      - WORKFLOW.md
+      - docs/validation/windows-11-e2e-2026-10-13-*.md
+      - docs/validation/windows-11-offline-prep-2026-10-14.md
+      - docs/validation/w11-010-production-delivery.md
+      - docs/validation/w11-010-live-simulation.md
+      - docs/validation/w11-010-simulation-readback-arbitration.json
+      - docs/validation/w11-010-production-before-simulation.json
+    acceptance_criteria:
+      - manual/reusable workflow 的 self-hosted job 固定 if false，steps 僅停用說明；禁止 push/PR/merge_group trigger、秘密及任意 runtime 路徑輸入。
+      - 保留 group w11-obs-integration 與既有 labels/check name；hosted job 只回報 PREP_DISABLED/not_certified，不輸出授權或可認證 SHA。
+      - live CLI/run_live_harness/實際 spawn adapter 固定 PREP_LIVE_DISABLED 非零或拒絕；在任何資源或秘密讀取前停止，無 env/flag/SHA 解鎖；W11-011 才可透過 protected 程式變更啟用。
+      - portable fixture 位於 repo 外獨立 lab root，必填 scene/source/zoom；純函式及 fake 驗證 argv 含 --portable、cwd=executable.parent，範例為 obs/bin/64bit/obs64.exe。
+      - runtime 只驗證 fixture 結構與邊界及版本觀測的純判定；標 structural_valid/runtime_verified=false，不執行 fixture 指定程式、不宣稱 frozen 安裝或 ACL 已驗證。
+      - 僅127.0.0.1:4455；注入資料驗證 listener owner/exposure、未知查詢 fail closed、局部互斥與完整 acquisition cleanup，不探測實機或改 firewall。
+      - 內部 lifecycle seam 要求明確 fake 介面且無真實 adapter 預設；finally 覆蓋 spawn/建構失敗，baseline/read-back/disconnect/owned process cleanup 分列 primary/cleanup failure。
+      - 診斷只輸出固定 stage/code/受控 type 與有限 transform；禁止原始 exception/cleanup/stdout/stderr 串接，sentinel tests 驗證無秘密或 traceback 洩漏。
+      - hardware-free tests 覆蓋固定停用、防偽批准、portable、fixture/runtime 純判定、listener、timeout、完整 cleanup 與 redaction；完整既有 Layer A suite 不退化。
+    forbidden_actions: [runner_registration, runner_activation, runtime_download_or_install, secret_creation, real_obs, microphone, asr_model_download, github_settings_mutation, production_publisher_extension]
+    evidence: docs/validation/windows-11-offline-prep-2026-10-14.md
+  - id: W11-011
+    epic: E4
+    title: Windows 11 single-monitor activation and real-machine certification
+    status: Blocked
+    blocked_reason: offline_preparation_and_single_monitor_activation_readiness_pending
+    blocked_on:
+      - W11-011-PREP
+      - runner_membership_and_pre_activation_policy_revalidation
+      - isolated_lab_runtime_acl_readiness
+    completion_profile: layer_a_plus_layer_b_exact_sha
+    ci_stage: layer_b_activation
+    arbitration:
+      state: resolved
+      reason: public_runner_isolation_and_lab_provisioning_ownership
+      decision: needs_human
+      route: windows_arbitrator
+      model: gpt-6-astra
+      model_reasoning_effort: medium
+      agent_id: 01a132da-4844-7120-9200-1ffc3a38ba7c
+      human_input_required: true
+      confidence: high
+      evidence: docs/validation/windows-11-e2e-2026-10-13-arbitration.md
+    approval_gate_status:
+      windows11_real_hardware_lab: approved
+    readiness:
+      state: blocked
+      certification_scope: single_monitor_existing_configuration
+      deferred_certification_ticket: W11-013
+      multi_monitor_fields_are_informational_only: true
+      runner_policy_verified: true
+      runner_policy_evidence_source: user_supplied_gh_api_readback
+      runner_membership_verified: false
+      runner_policy_revalidation_before_activation_required: true
+      runner_group_id: 3
+      runner_group_name: w11-obs-integration
+      allowed_repository_id: 1338358349
+      allowed_workflows: [Wells-sideproj/obs-voice-command-windows/.github/workflows/windows11-integration.yml@refs/heads/develop]
+      runner_policy_evidence: docs/validation/windows-11-offline-prep-2026-10-14.md
+      mixed_dpi_negative_coordinate_fixture_available: false
+      user_confirmed_single_monitor: true
+      display_constraint_confirmed_on: "2026-10-14"
+      multi_monitor_hardware_certification: unverified
+      single_monitor_blocks_offline_preparation: false
+      preparation: pending_W11-011-PREP
+      single_monitor_hardware_evidence: pending_live_activation
+      code_readiness: pending_PREP_and_pre_activation_readiness
+      live_readiness: pending_actual_merged_sha_and_trusted_authorization
+      exact_sha_authorization_required_before_code_pr: false
+      activation_prerequisites:
+        - protected_W11-011_code_activation
+        - fresh_runner_group_repository_workflow_and_membership_readback
+        - trusted_bootstrap_canonical_paths_runtime_integrity_and_acl
+        - actual_python_3_12_uv_0_11_8_venv_cache_and_frozen_install_evidence
+        - controller_managed_non_caller_writable_exact_sha_authorization_after_merge
+        - authorization_event_workflow_checkout_protected_tip_revalidation_before_side_effects
+    hardware_setup_authorization:
+      approved_on: "2026-10-13"
+      user_response: "好的"
+      scope: current_pc_dedicated_runner_and_isolated_obs_test_environment
+      evidence: docs/validation/windows-11-e2e-2026-10-13-preflight.md
+      organization_runner_group_api: user_verified_read_access_with_fine_grained_pat
+      detected_display_count: 1
+      runner_activated: false
+    retry:
+      state: none
+      consecutive_code_failures: 0
+      total_code_failures: 0
+      repair_ticket: null
+      last_failed_layer: null
+      last_failed_run: null
+    depends_on: [W11-010, W11-011-PREP]
     touch_set:
       - docs/validation/windows-11-e2e-*.md
       - .github/workflows/windows11-integration.yml
+      - tools/windows11_integration_harness.py
+      - tools/windows11_lab.py
+      - tests/integration/windows11/test_layer_b_harness.py
+      - tests/integration/windows11/test_workflow_contracts.py
+      - tests/integration/windows11/test_windows11_lab.py
+      - tests/integration/windows11/fixtures/windows11-lab.example.toml
+    acceptance_criteria:
+      - 由 PREP 最終 protected merge 起交付 activation；同 exact merged SHA 的 trusted Layer A、真實 deterministic Layer B 與 cleanup 全部成功。
+      - 保留 fresh runner policy/membership、隔離 portable OBS、runtime/venv/frozen install/ACL 與合併後可信可撤銷 exact-SHA authorization；缺漏或 drift 於 live 排程及 side effect 前拒絕。
+      - 保存遮蔽後 OBS scene/source/monitor_id/baseline 證據，記錄 Windows/OBS/Python/uv/mic 與實際單螢幕 display count、解析度、physical rectangle、現有 DPI 及 monitor mapping。
+      - 在現有單一 capture monitor 驗證游標追蹤、zoom center 與 production command-to-transform；不宣稱未測 DPI，多螢幕實測移交 W11-013。
+      - 每個預設正向 phrase 各10次皆觸發；至少10個負向 utterances 零誤觸；10次至少9次在phrase結束後1.5秒內開始transform，附同SHA測量證據。
+      - zoom out/Ctrl-C/OBS reconnect 後 position誤差不大於0.5px、scale不大於1e-4；primary及cleanup分開判斷，baseline read-back與owned process cleanup不可省略。
+      - 驗證 list-devices、named device、dry-run、首次模型下載及第二次cache hit；語音實測不取代deterministic Layer B。
+      - 將 PREP 固定停用測試演進為有效可信授權才可live；保留全部fake lifecycle/portable/listener/mutex/cleanup/secret sentinel及共用regression，不以flag或approved字串自證授權。
+      - 不自動改顯示縮放、解析度、layout、driver、BIOS、全域PATH/共享runtime或重新啟動系統。
     approval_gates:
       - windows11_real_hardware_lab
   - id: W11-012
     epic: E7
-    title: Release candidate and final handoff
+    title: Single-monitor release candidate and final handoff
     status: Blocked
     blocked_reason: dependency_blocked_by_W11-011
     completion_profile: layer_a_plus_layer_b_exact_sha
     ci_stage: release_candidate
     release_readiness_required: true
+    release_scope: windows11_single_monitor_mvp
     arbitration:
       state: none
       reason: null
@@ -1270,3 +1488,47 @@ tickets:
       - docs/releases/**
     approval_gates:
       - tag and GitHub Release publication
+    acceptance_criteria:
+      - mandatory_tickets除本票外全部Done，且本票其餘AC與exact-SHA profile全部成立後才可Done；W11-013不作本期前置。
+      - 乾淨clone鎖版安裝、build與Windows/macOS regression成功；release candidate自身SHA重跑LayerA/真實LayerB/cleanup，不能借W11-011舊SHA。
+      - 完成原版本/CITATION/README/release notes與rollback；證據齊備才稱single-monitor certified並列實測DPI/解析度，multi-monitor unverified追蹤W11-013。
+      - 當期單螢幕、安全、cleanup與共用regression相關Repair Ticket仍阻擋release，即使發現於延後票；只排除已批准延期的多螢幕缺證。
+      - tag與GitHub Release發布仍須另外明確批准，不因本範圍調整自動授權。
+  - id: W11-013
+    epic: E4
+    title: Deferred multi-monitor, mixed-DPI and negative-coordinate real-machine certification
+    status: Blocked
+    blocked_reason: deferred_by_user_2026_10_15_multimonitor_fixture_and_live_readiness_pending
+    depends_on: [W11-011]
+    completion_profile: layer_a_plus_layer_b_exact_sha
+    ci_stage: layer_b_certification
+    excluded_from_release_scope: windows11_single_monitor_mvp
+    execution:
+      worker_profile: implementer
+      arbitration_profile: arbitrator
+      escalation_threshold: low
+    arbitration:
+      state: resolved
+      decision: dependency_dag_change
+      reason: user_approved_deferred_multimonitor_certification
+      evidence: docs/validation/windows-11-offline-prep-2026-10-14.md
+    retry:
+      state: none
+      consecutive_code_failures: 0
+      total_code_failures: 0
+      repair_ticket: null
+      last_failed_layer: null
+      last_failed_run: null
+    touch_set:
+      - docs/validation/windows-11-multimonitor-*.md
+      - docs/windows/**
+    approval_gates:
+      - windows11_real_hardware_lab
+    approval_gate_status:
+      windows11_real_hardware_lab: pending_multimonitor_scope_validation
+    acceptance_criteria:
+      - 至少一組真實雙螢幕mixed-DPI及左側或上方負座標排列；記錄100/125/150/200百分比跨DPI真機矩陣各案例與實際結果，未跑不PASS。
+      - 驗證monitor_id mapping、capture tracking、移至非capture monitor的freeze、返回後追蹤；zoom out/Ctrl-C/reconnect復原position不大於0.5px、scale不大於1e-4。
+      - 同一exact merged SHA的trusted Layer A、真實Layer B及cleanup全成功；mock/單螢幕縮放/虛擬display不替代雙螢幕實證。
+      - 延用W11-011安全harness；實際硬體與設定變更依批准邊界驗證，不自動變更display/driver；需要程式修復先仲裁具體失敗與touch_set。
+      - 保留現有多螢幕功能與hardware-free regression；缺硬體只阻擋本票，影響當期安全或共用功能的真實缺陷仍回release blocker。
