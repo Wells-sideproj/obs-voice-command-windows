@@ -71,7 +71,8 @@ The parent task may be set to Luna without weakening arbitration. The route's cu
 - Runs only from trusted `push` to `develop` or an explicitly authorized `workflow_dispatch`; never execute untrusted pull-request code on this runner.
 - The runner must have an interactive logged-in desktop, a dedicated OBS test profile/scene collection, and exclusive access to port 4455.
 - The harness starts test OBS, waits for `127.0.0.1:4455`, exercises the production command-to-transform path, reads the OBS transform, verifies zoom-in and restore, and always restores the baseline transform during cleanup.
-- W11-010 implements and hardware-free-tests the Layer B workflow and harness without activating real OBS on every `develop` push. W11-011 activates and executes the trusted Layer B certification path.
+- W11-010 implements and hardware-free-tests the Layer B workflow and harness without activating real OBS on every `develop` push. W11-011 activates and executes the trusted Layer B certification path for the existing single-monitor DPI/resolution. W11-013 owns deferred multi-monitor, mixed-DPI, negative-coordinate, and cross-monitor freeze real-machine certification; existing code and mock regression remain intact.
+- 依2026-10-15使用者批准，W11-012當期單螢幕 release 依 manifest 的 mandatory set 完成，不等待 W11-013 的延期實機證據；影響當期功能、安全、cleanup 或共用 regression 的缺陷仍阻擋 release。未測配置不得宣稱 certified。
 - Layer B is post-merge by design. It does not gate W11-001 through W11-010; it gates only tickets whose `completion_profile` requires Layer B, plus release readiness.
 
 ## Bootstrap and unattended execution
@@ -82,7 +83,7 @@ The parent task may be set to Luna without weakening arbitration. The route's cu
 - In unattended mode, agents must never launch a browser or device-auth flow. They may use only an already authenticated CLI session, existing token, or existing app credential.
 - Missing interactive authentication, repository administration permission, shared-runtime approval, or real-hardware availability blocks only the owning ticket and its transitive descendants. It does not consume the code retry budget, and the orchestrator continues every independent Ready ticket whose own gates are satisfied.
 - Unattended execution never authorizes a bypass. Apart from the separately ratified and one-time `empty_origin_baseline_seed`, there is no direct push to `develop`, REST/manual/admin merge, disabled check, weakened rule, or secret copied into repository files, logs, artifacts, or prompts.
-- W11-001 does not require OBS to be running. `MISSING_OBS` or `UNREACHABLE_ENDPOINT` is acceptable sanitized preflight evidence; live API, transform, microphone, mixed-DPI, and real-hardware evidence belongs to W11-011.
+- W11-001 does not require OBS to be running. `MISSING_OBS` or `UNREACHABLE_ENDPOINT` is acceptable sanitized preflight evidence. Live API, transform, microphone, and existing-configuration single-monitor evidence belongs to W11-011; deferred multi-monitor/mixed-DPI/negative-coordinate/cross-monitor evidence belongs to W11-013.
 
 ## Retry and arbitration policy
 

@@ -1,0 +1,36 @@
+{
+  "ticket_id": "W11-010",
+  "agent_id": "01a116df-deb7-7262-9de8-67b9d41a97f4",
+  "route": "windows_arbitrator",
+  "model": "gpt-6-astra",
+  "model_reasoning_effort": "medium",
+  "decision": "targeted_repair",
+  "failure_class": "unresolved_simulation_readback",
+  "confirmed_infrastructure": false,
+  "code_retry_consumed": false,
+  "failed_run": 38148400151,
+  "failed_at": "2026-10-11T14:44:34Z",
+  "command": "python tools/post_merge_publisher.py --simulation-case \"$POST_MERGE_SIMULATION_CASE\"",
+  "error": {"status": "blocked", "category": "blocked", "error": "simulation publication read-back missing or inconsistent", "exit_code": 1},
+  "root_cause": "未確認。當下錯誤合併 missing/number/body/state mismatch，事後 Issue22 正確無法還原失敗當下；suspected visibility 僅是假說。",
+  "bounded_revalidation": {
+    "maximum_dispatches": 1,
+    "case": "pass",
+    "accounting": "暫記 infrastructure allowance，不代表已歸因 infrastructure",
+    "preconditions": [
+      "核對 lineage infrastructure allowance 至少剩一次",
+      "protected develop 仍精確 b4ae89923f2a55c9e132f584d0ce4cb2e7b50580，workflow/code 未漂移，沒有其他 simulation 執行者",
+      "兩次相隔短暫時間的 direct GET Issue22 與完整分頁 list-issues 一致且唯一，bot 作者、number、完整 body、payload、closed state 相符"
+    ],
+    "acceptance": [
+      "只 dispatch 一次新的 case=pass，不同時 rerun 舊 run，也不改成 case=rerun",
+      "workflow success，production step skipped，publisher case=pass/issue22/created_issue=false/count0/observations[pass]",
+      "完成後 direct GET/list 一致，沒有新增 simulation issue，production projections/retry/Issue14 不變"
+    ],
+    "stop_condition": "任何前置或驗收不符即停；不得自動使用第二次 allowance，也不得手動修補或刪除 projection。"
+  },
+  "success_follow_up": "保留原 run failure 與未知根因；成功可補足 live PASS，再依既有授權執行獨立 FAIL/rerun，同一 Issue22，rerun count 不增加。全 acceptance 完成前不得 Done。",
+  "failure_follow_up": "新 Luna repair PR 改善去敏 missing/number/body/state 診斷；以已知 number direct GET 驗證寫入、list 保留唯一性與 duplicate guard；有界 GET 觀察，禁止不確定 POST 重送或放寬驗證。fake tests 包含 list 暫缺、close 後 list 舊 state、真 payload mismatch、duplicate。是否計 code retry 依新增證據，不能回溯猜測。",
+  "human_input_required": false,
+  "confidence": "high"
+}
